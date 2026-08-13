@@ -1,81 +1,42 @@
-# PlankEye — Entraînement Kaggle 2× T4
+# Train_Kaggle_plank_Detector
 
-Entraînement du modèle **PlankEye** pour la détection de planches et l'estimation de leurs **4 coins**, avec :
+Entraînement du modèle **PlankEye** pour la détection de planches et de leurs coins, avec deux environnements d'exécution clairement séparés :
 
-- dépôt GitHub **privé** ;
-- récupération automatique du modèle depuis GitHub ;
-- entraînement **DistributedDataParallel (DDP)** sur **2× Tesla T4** ;
-- reprise automatique depuis le dernier checkpoint ;
-- sauvegarde persistante des checkpoints dans un dataset Kaggle privé ;
-- sauvegarde automatique tous les 5 epochs ;
-- sauvegarde manuelle possible à tout moment.
+- **Kaggle** : entraînement prévu principalement sur **2 × NVIDIA T4** avec DDP.
+- **Lightning AI** : entraînement prévu principalement sur **1 × NVIDIA T4**, avec accumulation de gradients pour conserver un batch effectif équivalent.
+
+Le dépôt contient le code du modèle, les notebooks d'entraînement, les checkpoints et les utilitaires nécessaires pour reprendre un entraînement existant.
 
 ---
 
-## Structure du dépôt
+## 1. Structure du dépôt
 
 ```text
 Train_Kaggle_plank_Detector/
+├── README.md
+├── dataset/
+│   ├── PlankEye_Colab.ipynb
+│   ├── model_improved.py
+│   └── dataset_fusionne/
+│       └── dataset_fusionne/
+│           ├── images/
+│           └── labels/
 ├── model/
 │   └── model.py
+├── model_poids/
+│   ├── best_plankeye_v4_1class_512.pt
+│   └── last_plankeye_v4_1class_512.pt
 ├── train/
-│   └── PlankEye_Training_2xT4_Kaggle_PRIVATE_GITHUB_FINAL.ipynb
-└── README.md
+│   ├── PlankEye_Training_2xT4_Kaggle.ipynb
+│   └── PlankEye_Training_Lightning.ipynb
+└── voir_epoch.py
 ```
 
-### Fichiers principaux
-
-- `model/model.py` : architecture du modèle PlankEye.
-- `train/PlankEye_Training_2xT4_Kaggle_PRIVATE_GITHUB_FINAL.ipynb` : notebook Kaggle complet pour cloner le dépôt privé, préparer les données, récupérer les checkpoints, reprendre l'entraînement et lancer le DDP sur 2 GPU.
+Le dossier `dataset/` n'est pas nécessairement versionné entièrement sur GitHub : les images représentent plusieurs Go. Le dataset complet peut être récupéré directement depuis Kaggle.
 
 ---
 
-# Architecture du modèle
-
-Le modèle utilise notamment :
-
-- **MobileNetV3-Large** comme backbone ;
-- **BiFPN** pour fusionner les features multi-échelles ;
-- un **refiner haute résolution** ;
-- une tête de **heatmap** ;
-- une tête de prédiction des **4 coins** ;
-- une tête d'**offset du centre** ;
-- des losses géométriques adaptées aux quadrilatères ;
-- **AMP / FP16** ;
-- **EMA** ;
-- **AdamW**.
-
-Le modèle actuel travaille avec une seule classe :
-
-```text
-planche
-```
-
----
-
-# Dataset
-
-Le dataset attendu contient :
-
-```text
-dataset_fusionne/
-├── images/
-│   ├── image001.jpg
-│   ├── image002.jpg
-│   └── ...
-└── labels/
-    ├── image001.txt
-    ├── image002.txt
-    └── ...
-```
-
-Chaque ligne de label suit le format :
-
-```text
-classe x1 y1 x2 y2 x3 y3 x4 y4
-```
-
-Les coordonnées sont normalisées entre `0` et `1`.
+## 2. Dataset
 
 Dataset Kaggle utilisé :
 
@@ -83,806 +44,995 @@ Dataset Kaggle utilisé :
 max778/plankeye
 ```
 
----
-
-# Checkpoints
-
-Deux checkpoints sont utilisés :
+Taille observée :
 
 ```text
-best_plankeye_v4_1class_512.pt
-last_plankeye_v4_1class_512.pt
+environ 6.2 Go une fois téléchargé/décompressé
 ```
 
-Dataset Kaggle privé utilisé :
+Contenu attendu :
 
 ```text
-max778/checkpoints
+dataset/
+└── dataset_fusionne/
+    └── dataset_fusionne/
+        ├── images/
+        └── labels/
 ```
 
-## `best_...pt`
-
-Contient le meilleur modèle obtenu selon le score `quality`.
-
-```python
-quality = (
-    0.3 * mAP50
-    + 0.5 * mAP75
-    + 0.2 * (PCK4 * match_recall)
-)
-```
-
-## `last_...pt`
-
-Contient le dernier epoch terminé et permet de reprendre exactement l'entraînement.
-
-Exemple :
+État actuellement attendu :
 
 ```text
-epoch sauvegardé : 26
-prochain epoch    : 27
-best_epoch        : 25
-best_quality      : 0.8453918484740378
+5137 images
+5137 labels
 ```
 
-Le notebook sélectionne automatiquement :
+Chaque image doit avoir un fichier de label associé.
 
-- pour `last.pt` : le checkpoint avec l'epoch le plus avancé ;
-- pour `best.pt` : le checkpoint avec la meilleure `best_quality`.
+### Vérification rapide
 
-Cela évite qu'un ancien checkpoint Kaggle écrase un checkpoint local plus récent.
+Depuis la racine du dépôt :
 
----
+```bash
+du -sh dataset
 
-# GitHub privé
+find dataset -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) \
+  | wc -l
 
-Le dépôt est prévu pour rester **privé**.
-
-Kaggle récupère automatiquement le code avec un **GitHub Personal Access Token** enregistré dans les **Kaggle Secrets**.
-
-## Secret Kaggle
-
-Créer dans Kaggle un secret nommé exactement :
-
-```text
-GITHUB_TOKEN
+find dataset -type f -iname "*.txt" | wc -l
 ```
 
-Le token ne doit jamais être écrit directement dans le notebook, dans le README ou dans Git.
-
-Le token GitHub doit idéalement être limité à :
+Résultat attendu :
 
 ```text
-Repository access:
-Only select repositories
-
-Repository:
-Train_Kaggle_plank_Detector
-
-Permission:
-Contents -> Read-only
+5137
+5137
 ```
 
 ---
 
-# Configuration Kaggle
+# PARTIE A — KAGGLE
 
-Avant de lancer le notebook :
+## 3. Entraînement sur Kaggle
 
-## 1. GPU
-
-```text
-Accelerator : GPU T4 x2
-```
-
-Le notebook vérifie que 2 GPU sont disponibles avant de lancer le DDP.
-
-## 2. Internet
+Notebook principal :
 
 ```text
-Internet : On
+train/PlankEye_Training_2xT4_Kaggle.ipynb
 ```
 
-Internet est nécessaire pour :
-
-- cloner le dépôt GitHub privé ;
-- envoyer les nouvelles versions du dataset de checkpoints vers Kaggle.
-
-## 3. Ajouter les Inputs
-
-Ajouter dans **Input** :
+Cette version est conçue pour l'environnement Kaggle et utilise les chemins de type :
 
 ```text
-max778/plankeye
-max778/checkpoints
+/kaggle/input/
+/kaggle/working/
 ```
 
-Les chemins ressemblent ensuite à :
+Elle est distincte de la version Lightning AI.
 
-```text
-/kaggle/input/datasets/max778/plankeye
-/kaggle/input/datasets/max778/checkpoints
-```
-
-## 4. Activer le secret GitHub
+### Configuration GPU
 
 Dans Kaggle :
 
-```text
-Add-ons
-→ Secrets
-→ GITHUB_TOKEN
-→ ON
-```
-
----
-
-# Fonctionnement du notebook
-
-Le notebook suit cet ordre :
-
-```text
-1. Vérification GPU / CUDA / Internet / Kaggle CLI
-                    ↓
-2. Clone du dépôt GitHub privé
-                    ↓
-3. Copie model/model.py vers model_improved.py
-                    ↓
-4. Préparation du dataset
-                    ↓
-5. Sélection de best.pt / last.pt
-                    ↓
-6. Vérification de l'epoch de reprise
-                    ↓
-7. Génération du script DDP
-                    ↓
-8. Lancement GPU 0 + GPU 1
-                    ↓
-9. Entraînement
-                    ↓
-10. Sauvegarde locale + persistante
-```
-
-Le dépôt GitHub est cloné dans :
-
-```text
-/kaggle/working/Train_Kaggle_plank_Detector
-```
-
-Le modèle :
-
-```text
-model/model.py
-```
-
-est automatiquement copié vers :
-
-```text
-/kaggle/working/PlankEyev2_multipieces/model_improved.py
-```
-
-Le script d'entraînement continue donc d'utiliser l'import historique `model_improved` sans modifier l'architecture.
-
----
-
-# Paramètres principaux
-
-Configuration actuelle :
+1. Ouvrir le notebook.
+2. Aller dans les paramètres de la session.
+3. Activer l'accélérateur GPU.
+4. Sélectionner **GPU T4 x2** lorsque cette configuration est disponible.
+5. Vérifier dans le notebook :
 
 ```python
-IMG_SIZE = 512
+import torch
 
-BATCH_SIZE = 8
+print(torch.cuda.is_available())
+print(torch.cuda.device_count())
+
+for i in range(torch.cuda.device_count()):
+    print(i, torch.cuda.get_device_name(i))
+```
+
+Configuration attendue pour le notebook Kaggle :
+
+```text
+GPU 0 : T4
+GPU 1 : T4
 WORLD_SIZE = 2
-GRAD_ACCUM = 1
-
-EPOCHS = 180
+BATCH_SIZE = 8 par GPU
+batch global = 16
 ```
 
-Batch global :
-
-```text
-8 images/GPU × 2 GPU × 1 accumulation
-= 16 images
-```
-
----
-
-# Learning rate
-
-```python
-LR_HEAD = 3.0e-4
-LR_BACKBONE = 2.0e-5
-
-LR_MIN_HEAD = 2.0e-6
-LR_MIN_BACKBONE = 2.0e-7
-```
-
-Warmup :
-
-```python
-HEAD_WARMUP_EPOCHS = 3
-BACKBONE_WARMUP_EPOCHS = 3
-```
-
-Déblocage progressif du backbone :
-
-```text
-Epoch 0–7   : backbone gelé
-Epoch 8     : déblocage des 6 derniers blocs
-Epoch 20+   : backbone entièrement dégelé
-```
-
----
-
-# DDP — 2× Tesla T4
-
-Le notebook lance deux processus :
+Le notebook Kaggle utilise DDP avec deux processus :
 
 ```text
 rank 0 -> GPU 0
 rank 1 -> GPU 1
 ```
 
-Initialisation distribuée :
+---
+
+## 4. Ajouter le dataset dans Kaggle
+
+Le dataset principal est :
 
 ```text
-backend = nccl
-init_method = FileStore
+max778/plankeye
 ```
 
-Le modèle est enveloppé avec :
+Le dataset de checkpoints persistants est :
+
+```text
+max778/checkpoints
+```
+
+Dans un notebook Kaggle, ajouter les datasets dans la section **Input / Add Input**.
+
+Le notebook peut ensuite rechercher les données sous :
+
+```text
+/kaggle/input/
+```
+
+Selon le montage créé par Kaggle, le chemin peut être court ou complètement qualifié. Le notebook doit donc éviter de dépendre d'un seul chemin codé en dur lorsqu'une recherche récursive est déjà prévue.
+
+Exemple de structure :
+
+```text
+/kaggle/input/
+└── ...
+    └── plankeye/
+        └── dataset_fusionne/
+            └── dataset_fusionne/
+                ├── images/
+                └── labels/
+```
+
+---
+
+## 5. Checkpoints sur Kaggle
+
+Les deux fichiers principaux sont :
+
+```text
+best_plankeye_v4_1class_512.pt
+last_plankeye_v4_1class_512.pt
+```
+
+Rôle :
+
+- `best_...pt` : meilleur modèle obtenu selon la métrique de qualité.
+- `last_...pt` : dernier état complet de l'entraînement, utilisé pour reprendre après un arrêt.
+
+Dataset Kaggle utilisé pour leur persistance :
+
+```text
+max778/checkpoints
+```
+
+Le notebook peut sauvegarder automatiquement ces checkpoints vers le dataset Kaggle à intervalles réguliers.
+
+Une sauvegarde manuelle peut aussi être déclenchée après l'arrêt de l'entraînement.
+
+### Vérifier l'epoch d'un checkpoint
+
+Depuis le dépôt :
+
+```bash
+python voir_epoch.py
+```
+
+Ou en Python :
 
 ```python
-DistributedDataParallel(
-    model,
-    device_ids=[LOCAL_RANK],
-    output_device=LOCAL_RANK,
-    broadcast_buffers=False,
-    find_unused_parameters=True,
-    gradient_as_bucket_view=True,
+import torch
+
+ckpt = torch.load(
+    "model_poids/last_plankeye_v4_1class_512.pt",
+    map_location="cpu",
+    weights_only=False,
 )
+
+print("epoch :", ckpt.get("epoch"))
+print("best_epoch :", ckpt.get("best_epoch"))
+print("best_quality :", ckpt.get("best_quality"))
 ```
 
-`find_unused_parameters=True` est nécessaire avec l'architecture actuelle car certains paramètres ne participent pas à chaque passe forward.
+---
 
-Il ne faut pas lancer directement :
+# PARTIE B — LIGHTNING AI
+
+## 6. Principe
+
+Lightning AI utilise un **Studio** Linux persistant.
+
+Le projet utilisé dans ce dépôt est prévu sous :
+
+```text
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector
+```
+
+Le workflow recommandé est :
+
+```text
+CPU
+  |
+  | préparation du dépôt + téléchargement du dataset
+  v
+GPU T4
+  |
+  | entraînement
+  v
+checkpoints dans model_poids/
+```
+
+Il est préférable de préparer le projet sur CPU et de passer sur GPU seulement lorsque le code, le dataset et les checkpoints sont prêts.
+
+---
+
+## 7. Cloner le dépôt dans Lightning AI
+
+Dans le terminal du Studio :
 
 ```bash
-python train_plankeye_ddp.py
+cd /teamspace/studios/this_studio
+
+git clone https://github.com/maaxxe/Train_Kaggle_plank_Detector.git
+
+cd Train_Kaggle_plank_Detector
+
+ls
 ```
 
-car cela démarrerait un seul processus et donc un seul GPU.
-
-Il faut utiliser la cellule de lancement DDP prévue dans le notebook.
-
-Au démarrage, vérifier :
+Structure minimale attendue :
 
 ```text
-world_size=2
-batch/GPU=8
-accum=1
-batch global=16
-```
-
-et non :
-
-```text
-world_size=1
+README.md
+model/
+model_poids/
+train/
+voir_epoch.py
 ```
 
 ---
 
-# Validation
+## 8. Importer le dataset Kaggle dans Lightning AI
 
-L'entraînement est distribué sur les deux GPU.
+C'est la méthode recommandée pour éviter d'envoyer manuellement environ 6 Go depuis le PC.
 
-La validation est effectuée uniquement par le **rank 0**.
+Le dataset peut rester **privé** sur Kaggle. Il faut simplement authentifier le CLI Kaggle dans Lightning.
 
-Pendant la validation, il est donc normal de voir le GPU 1 peu utilisé ou à 0 %.
+### 8.1 Installer le CLI Kaggle
+
+```bash
+pip install -U kaggle
+```
+
+Vérification :
+
+```bash
+kaggle --version
+```
 
 ---
 
-# Sauvegarde automatique
+## 9. Créer un token Kaggle
 
-Les checkpoints sont d'abord sauvegardés dans :
+Sur Kaggle :
 
 ```text
-/kaggle/working/PlankEyev2_multipieces/
+Settings
+-> API Tokens
+-> Generate New Token
 ```
 
-avec :
+Donner par exemple le nom :
+
+```text
+LightningAI-PlankEye
+```
+
+Kaggle fournit ensuite un token de type :
+
+```text
+KGAT_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Ne jamais :
+
+- mettre ce token dans Git ;
+- l'écrire dans le README ;
+- le committer dans un notebook ;
+- le publier dans une capture d'écran.
+
+Si un token est exposé, le révoquer immédiatement puis en générer un nouveau.
+
+---
+
+## 10. Authentifier Lightning auprès de Kaggle
+
+### Méthode 1 — variable d'environnement
+
+Dans le terminal Lightning :
+
+```bash
+export KAGGLE_API_TOKEN="TON_TOKEN_KAGGLE"
+```
+
+Tester :
+
+```bash
+kaggle datasets list --mine
+```
+
+Pour ce projet, le résultat doit notamment contenir :
+
+```text
+max778/plankeye
+max778/checkpoints
+```
+
+### Méthode 2 — fichier `access_token`
+
+Pour éviter de refaire l'export à chaque nouveau shell :
+
+```bash
+mkdir -p ~/.kaggle
+
+echo "TON_TOKEN_KAGGLE" > ~/.kaggle/access_token
+
+chmod 600 ~/.kaggle/access_token
+```
+
+Puis tester :
+
+```bash
+kaggle datasets list --mine
+```
+
+---
+
+## 11. Télécharger le dataset privé Kaggle dans Lightning
+
+Depuis la racine du dépôt :
+
+```bash
+cd /teamspace/studios/this_studio/Train_Kaggle_plank_Detector
+```
+
+Créer le dossier :
+
+```bash
+mkdir -p dataset
+```
+
+Télécharger et décompresser directement le dataset :
+
+```bash
+kaggle datasets download \
+  -d max778/plankeye \
+  -p dataset \
+  --unzip
+```
+
+Le transfert se fait directement de Kaggle vers Lightning.
+
+Après téléchargement :
+
+```bash
+du -sh dataset
+```
+
+Puis :
+
+```bash
+find dataset -maxdepth 4 -type d | sort
+```
+
+Structure attendue :
+
+```text
+dataset
+dataset/dataset_fusionne
+dataset/dataset_fusionne/dataset_fusionne
+dataset/dataset_fusionne/dataset_fusionne/images
+dataset/dataset_fusionne/dataset_fusionne/labels
+```
+
+Vérifier le contenu :
+
+```bash
+find dataset -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) \
+  | wc -l
+
+find dataset -type f -iname "*.txt" | wc -l
+```
+
+Résultat attendu :
+
+```text
+5137
+5137
+```
+
+Le chemin utilisé par le notebook Lightning est donc :
+
+```text
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector/dataset/dataset_fusionne/dataset_fusionne
+```
+
+---
+
+## 12. Télécharger les checkpoints Kaggle dans Lightning
+
+Si les checkpoints ne sont pas déjà présents dans Git ou dans `model_poids/`, ils peuvent également être récupérés depuis :
+
+```text
+max778/checkpoints
+```
+
+Commande :
+
+```bash
+cd /teamspace/studios/this_studio/Train_Kaggle_plank_Detector
+
+mkdir -p model_poids
+
+kaggle datasets download \
+  -d max778/checkpoints \
+  -p model_poids \
+  --unzip
+```
+
+Vérifier :
+
+```bash
+ls -lh model_poids
+```
+
+Les fichiers attendus sont :
 
 ```text
 best_plankeye_v4_1class_512.pt
 last_plankeye_v4_1class_512.pt
 ```
 
-Une copie est préparée dans :
-
-```text
-/kaggle/working/checkpoints_persistent/
-```
-
-Puis une nouvelle version du dataset Kaggle :
-
-```text
-max778/checkpoints
-```
-
-est créée automatiquement.
-
-Fréquence :
-
-```python
-PERSIST_EVERY = 5
-```
-
-Donc sauvegarde persistante aux epochs :
-
-```text
-5
-10
-15
-20
-25
-30
-...
-```
-
-et également lors d'un early stopping.
-
 ---
 
-# Sauvegarde manuelle
+## 13. Passer le Studio Lightning sur GPU T4
 
-Le notebook contient également une cellule permettant de pousser manuellement :
+Ne pas essayer d'installer `nvidia-smi` manuellement.
 
-```text
-best_plankeye_v4_1class_512.pt
-last_plankeye_v4_1class_512.pt
-```
-
-vers :
-
-```text
-max778/checkpoints
-```
-
-Elle peut être utilisée avant de fermer une session Kaggle.
-
----
-
-# Reprise de l'entraînement
-
-Le notebook lit automatiquement :
-
-```python
-ckpt["epoch"]
-ckpt["best_epoch"]
-ckpt["best_quality"]
-```
-
-Exemple :
-
-```text
-LAST ACTUEL
-========================================================================
-epoch sauvegardé : 26
-prochain epoch    : 27
-best_epoch        : 25
-best_quality      : 0.8453918484740378
-```
-
-Dans ce cas l'entraînement reprend à :
-
-```text
-epoch 27
-```
-
----
-
-# Workflow de développement
-
-Sur le PC / WSL :
+Si cette commande :
 
 ```bash
-cd ~/Train_Kaggle_plank_Detector
-
-git add .
-git commit -m "Update PlankEye"
-git push origin main
+nvidia-smi
 ```
 
-Puis, dans une nouvelle session Kaggle, la cellule GitHub clone automatiquement la dernière version du dépôt privé.
+renvoie :
 
 ```text
-PC / WSL
-   ↓
-modification model.py / notebook
-   ↓
-git push
-   ↓
-GitHub privé
-   ↓
-Kaggle + GITHUB_TOKEN
-   ↓
-git clone
-   ↓
-entraînement 2× T4
-   ↓
-best.pt / last.pt
-   ↓
-dataset privé max778/checkpoints
+command not found: nvidia-smi
+```
+
+le Studio est encore sur CPU.
+
+Dans l'interface Lightning :
+
+```text
+Machine
+-> Switch to GPU
+-> T4
+-> Request / Switch
+```
+
+Attendre le redémarrage complet du Studio.
+
+Puis vérifier :
+
+```bash
+nvidia-smi
+```
+
+Et :
+
+```bash
+python -c "import torch; \
+print('PyTorch:', torch.__version__); \
+print('CUDA:', torch.cuda.is_available()); \
+print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'aucun')"
+```
+
+Résultat attendu :
+
+```text
+CUDA: True
+GPU: Tesla T4
 ```
 
 ---
 
-# Fichiers à ne pas mettre dans Git
+## 14. Notebook Lightning
 
-Les checkpoints et datasets ne doivent pas être versionnés dans GitHub.
-
-Exemple `.gitignore` :
-
-```gitignore
-*.pt
-*.pth
-*.ckpt
-
-__pycache__/
-*.pyc
-
-.ipynb_checkpoints/
-
-output/
-checkpoints_persistent/
-
-.DS_Store
-```
-
-GitHub contient le **code**.
-
-Kaggle contient :
-
-- les **données** ;
-- les **checkpoints** ;
-- les ressources temporaires d'entraînement.
-
----
-
-# Notebook
-
-Notebook actuel :
+Notebook :
 
 ```text
-train/PlankEye_Training_2xT4_Kaggle_PRIVATE_GITHUB_FINAL.ipynb
+train/PlankEye_Training_Lightning.ipynb
 ```
 
-À lancer dans Kaggle avec :
+Il ne faut pas utiliser les chemins `/kaggle/...` dans cette version.
+
+Chemins principaux :
 
 ```text
-GPU T4 x2
-Internet On
-GITHUB_TOKEN activé
-max778/plankeye ajouté
-max778/checkpoints ajouté
-```
+Studio :
+/teamspace/studios/this_studio
 
-Puis exécuter les cellules dans l'ordr
+Projet :
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector
 
-# PlankEye — Entraînement Kaggle 2× T4
+Dataset :
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector/dataset/dataset_fusionne/dataset_fusionne
 
-Entraînement du modèle **PlankEye** pour la détection de planches et de leurs coins, avec reprise de checkpoint et entraînement multi-GPU sur **Kaggle 2× Tesla T4**.
+Modèle :
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector/model/model.py
 
-## Structure du dépôt
-
-```text
-Train_Kaggle_plank_Detector/
-├── model/
-│   └── model.py
-├── train/
-│   └── PlankEye_Training_2xT4_Kaggle.ipynb
-└── README.md
-```
-
-- `model/model.py` : architecture du modèle PlankEye.
-- `train/PlankEye_Training_2xT4_Kaggle.ipynb` : notebook Kaggle complet pour préparer les données, reprendre un checkpoint et entraîner avec 2 GPU.
-
----
-
-## Objectif
-
-Le modèle détecte les planches présentes dans une image et estime leurs **4 coins**.
-
-L'entraînement utilise notamment :
-
-- **MobileNetV3-Large**
-- **BiFPN**
-- refiner haute résolution
-- heatmaps
-- offsets
-- losses géométriques sur les coins
-- AMP / FP16
-- EMA
-- AdamW
-- entraînement **DistributedDataParallel (DDP)** sur 2 GPU
-
----
-
-## Environnement Kaggle
-
-Dans Kaggle :
-
-1. Créer ou ouvrir un Notebook.
-2. Ajouter le dataset contenant les images et labels.
-3. Ajouter le dataset contenant les checkpoints.
-4. Sélectionner :
-
-```text
-Accelerator : GPU T4 x2
-Internet    : ON
-```
-
-5. Importer le notebook :
-
-```text
-train/PlankEye_Training_2xT4_Kaggle.ipynb
-```
-
-6. Exécuter les cellules dans l'ordre.
-
----
-
-## Dataset
-
-Le notebook attend un dataset de la forme :
-
-```text
-dataset_fusionne/
-├── images/
-│   ├── image001.jpg
-│   ├── image002.jpg
-│   └── ...
-└── labels/
-    ├── image001.txt
-    ├── image002.txt
-    └── ...
-```
-
-Chaque ligne de label contient :
-
-```text
-classe x1 y1 x2 y2 x3 y3 x4 y4
-```
-
-Les coordonnées sont normalisées entre `0` et `1`.
-
-Le modèle actuel travaille en **1 classe** :
-
-```text
-planche
+Poids :
+/teamspace/studios/this_studio/Train_Kaggle_plank_Detector/model_poids
 ```
 
 ---
 
-## Paramètres principaux
+## 15. Lancer l'entraînement sur Lightning
 
-Configuration actuelle :
+Exécuter les cellules du notebook dans l'ordre.
 
-```python
-IMG_SIZE = 512
-BATCH_SIZE = 8       # par GPU
+Avant le lancement, vérifier impérativement :
+
+```text
+CUDA disponible : True
+Nombre de GPU : 1
+```
+
+Puis vérifier le dataset :
+
+```text
+images : 5137
+labels : 5137
+```
+
+Puis vérifier le checkpoint `last` :
+
+```text
+last_plankeye_v4_1class_512.pt
+epoch        : ...
+best_epoch   : ...
+best_quality : ...
+```
+
+Le notebook doit afficher l'epoch à partir duquel il va reprendre.
+
+Ne pas lancer l'entraînement si le checkpoint chargé n'est pas celui attendu.
+
+---
+
+## 16. Batch Lightning vs Kaggle
+
+### Kaggle — 2 × T4
+
+Configuration prévue :
+
+```text
+BATCH_SIZE = 8 par GPU
 WORLD_SIZE = 2
 GRAD_ACCUM = 1
+
+batch global = 8 × 2 = 16
 ```
 
-Le batch global vaut donc :
+### Lightning — 1 × T4
+
+Configuration prévue :
 
 ```text
-8 × 2 GPU = 16 images
+BATCH_SIZE = 8
+WORLD_SIZE = 1
+GRAD_ACCUM = 2
+
+batch effectif = 8 × 2 = 16
 ```
 
-L'entraînement peut reprendre automatiquement depuis un checkpoint existant.
+L'accumulation de gradients permet donc de conserver un batch effectif de 16 avec un seul GPU.
 
 ---
 
-## Checkpoints
+## 17. Dépendances
 
-Deux fichiers sont utilisés :
+Vérification rapide :
 
-```text
-best_plankeye_v4_1class_512.pt
-last_plankeye_v4_1class_512.pt
+```bash
+python -c "import torch, torchvision, numpy, matplotlib, PIL, tqdm; print('DEPENDANCES OK')"
 ```
 
-### `best_...pt`
+Si nécessaire :
 
-Contient le meilleur modèle obtenu selon le score `quality`.
+```bash
+pip install -U \
+  torch \
+  torchvision \
+  numpy \
+  matplotlib \
+  pillow \
+  tqdm \
+  kaggle
+```
 
-### `last_...pt`
+Éviter de réinstaller PyTorch inutilement sur une machine GPU si l'environnement Lightning possède déjà une version CUDA fonctionnelle.
 
-Contient le dernier epoch terminé et permet de reprendre l'entraînement exactement là où il s'est arrêté.
+Toujours vérifier ensuite :
 
-Exemple :
-
-```text
-epoch sauvegardé : 24
-prochain epoch    : 25
+```bash
+python -c "import torch; print(torch.cuda.is_available())"
 ```
 
 ---
 
-## Score `quality`
+## 18. Problème d'import du modèle
 
-Le meilleur checkpoint est sélectionné avec :
+Le dépôt contient :
 
 ```text
-quality =
-0.30 × mAP50
-+ 0.50 × mAP75
-+ 0.20 × (PCK4 × match_recall)
+model/
+└── model.py
 ```
 
-Le score privilégie donc :
+L'import suivant peut être incorrect :
 
-- la qualité globale de détection ;
-- la précision géométrique ;
-- la précision des coins.
+```python
+from model import NUM_CLASSES, IMG_SIZE, build_model
+```
+
+Utiliser :
+
+```python
+from model.model import NUM_CLASSES, IMG_SIZE, build_model
+```
+
+si le code importe directement le module présent dans `model/model.py`.
+
+Pour rechercher les imports incorrects :
+
+```bash
+grep -Rni "from model import" .
+```
 
 ---
 
-## Sauvegarde persistante Kaggle
+## 19. Vérifier le dernier epoch
 
-Les checkpoints sont sauvegardés localement dans :
+Commande :
 
-```text
-/kaggle/working/PlankEyev2_multipieces/
+```bash
+python voir_epoch.py
 ```
 
-Le notebook peut aussi envoyer automatiquement les checkpoints vers le dataset Kaggle :
+Ou directement :
+
+```python
+import torch
+
+path = "model_poids/last_plankeye_v4_1class_512.pt"
+
+ckpt = torch.load(
+    path,
+    map_location="cpu",
+    weights_only=False,
+)
+
+print("epoch        :", ckpt.get("epoch"))
+print("best_epoch   :", ckpt.get("best_epoch"))
+print("best_quality :", ckpt.get("best_quality"))
+```
+
+---
+
+## 20. Sauvegarde des checkpoints
+
+Pendant l'entraînement, conserver au minimum :
+
+```text
+model_poids/
+├── best_plankeye_v4_1class_512.pt
+└── last_plankeye_v4_1class_512.pt
+```
+
+Le fichier `last` est indispensable pour reprendre un entraînement interrompu.
+
+Le fichier `best` permet de conserver la meilleure version obtenue indépendamment du dernier epoch.
+
+---
+
+## 21. Envoyer les checkpoints vers le dataset Kaggle
+
+Dataset :
 
 ```text
 max778/checkpoints
 ```
 
-La sauvegarde persistante est effectuée périodiquement, par exemple tous les **5 epochs**.
+Le workflow du notebook peut effectuer automatiquement cette opération.
 
-Les deux fichiers envoyés sont :
+Pour une sauvegarde manuelle, préparer un dossier contenant :
 
 ```text
 best_plankeye_v4_1class_512.pt
 last_plankeye_v4_1class_512.pt
+dataset-metadata.json
 ```
 
-Une sauvegarde manuelle peut également être déclenchée depuis le notebook.
+Exemple de `dataset-metadata.json` :
+
+```json
+{
+  "title": "checkpoints",
+  "id": "max778/checkpoints",
+  "licenses": [
+    {
+      "name": "other"
+    }
+  ]
+}
+```
+
+Puis créer une nouvelle version :
+
+```bash
+kaggle datasets version \
+  -p checkpoints_persistent \
+  -m "PlankEye checkpoint update" \
+  --delete-old-versions
+```
+
+Avant cela, vérifier :
+
+```bash
+kaggle datasets list --mine
+```
 
 ---
 
-## Reprise de l'entraînement
+## 22. Arrêter et reprendre un entraînement
 
-Le notebook recherche les checkpoints existants et sélectionne le plus récent.
-
-Au lancement, vérifier que la sortie ressemble à :
+La reprise doit toujours se faire à partir de :
 
 ```text
-world_size=2 | batch/GPU=8 | accum=1 | batch global=16
-Reprise checkpoint : epoch 25
+last_plankeye_v4_1class_512.pt
 ```
 
-Si la sortie affiche :
+Workflow :
 
 ```text
-world_size=1
+entraînement
+    |
+    v
+last checkpoint
+    |
+    +--> arrêt de la session
+    |
+    v
+nouvelle session
+    |
+    v
+chargement du last checkpoint
+    |
+    v
+epoch suivant
 ```
 
-alors le notebook n'utilise pas les deux GPU et il faut relancer la cellule DDP prévue dans le notebook.
+Avant chaque reprise :
+
+```bash
+python voir_epoch.py
+```
 
 ---
 
-## Exemple de sortie
+## 23. Commandes utiles
+
+### Voir l'espace disque
+
+```bash
+df -h
+du -sh dataset
+du -sh model_poids
+```
+
+### Voir le GPU
+
+```bash
+nvidia-smi
+```
+
+Surveiller en continu :
+
+```bash
+watch -n 1 nvidia-smi
+```
+
+### Vérifier CUDA avec PyTorch
+
+```bash
+python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.device_count())"
+```
+
+### Voir les fichiers du projet
+
+Sans `tree` :
+
+```bash
+find . -maxdepth 3 -type f | sort
+```
+
+Installer `tree` si souhaité :
+
+```bash
+sudo apt update
+sudo apt install tree -y
+tree -L 3
+```
+
+### Voir l'état Git
+
+```bash
+git status
+```
+
+### Récupérer les dernières modifications
+
+```bash
+git pull
+```
+
+---
+
+## 24. Résumé Kaggle / Lightning AI
+
+| Élément | Kaggle | Lightning AI |
+|---|---|---|
+| Notebook | `PlankEye_Training_2xT4_Kaggle.ipynb` | `PlankEye_Training_Lightning.ipynb` |
+| Chemins | `/kaggle/...` | `/teamspace/studios/this_studio/...` |
+| GPU prévu | 2 × T4 | 1 × T4 |
+| Batch/GPU | 8 | 8 |
+| Accumulation | 1 | 2 |
+| Batch effectif/global | 16 | 16 |
+| Dataset | Input Kaggle | téléchargement via Kaggle CLI |
+| Dataset ID | `max778/plankeye` | `max778/plankeye` |
+| Checkpoints | `max778/checkpoints` | `model_poids/` + sauvegarde Kaggle possible |
+| DDP | oui, 2 GPU | automatique si plusieurs GPU |
+| Reprise | `last_...pt` | `last_...pt` |
+
+---
+
+## 25. Installation Lightning rapide de zéro
+
+Résumé complet pour repartir sur un nouveau Studio :
+
+```bash
+cd /teamspace/studios/this_studio
+
+git clone https://github.com/maaxxe/Train_Kaggle_plank_Detector.git
+
+cd Train_Kaggle_plank_Detector
+
+pip install -U kaggle
+
+export KAGGLE_API_TOKEN="TON_TOKEN_KAGGLE"
+
+kaggle datasets list --mine
+
+mkdir -p dataset
+
+kaggle datasets download \
+  -d max778/plankeye \
+  -p dataset \
+  --unzip
+
+find dataset -type f \
+  \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \) \
+  | wc -l
+
+find dataset -type f -iname "*.txt" | wc -l
+
+python voir_epoch.py
+```
+
+Ensuite :
 
 ```text
-TRAIN 23/180: 100%|██████████| 257/257
-VAL 23/180:   100%|██████████| 33/33
-
-[023/180]
-train=0.2559
-val=0.2644
-mAP50=0.9884
-mAP75=0.9244
-PCK4=0.360
-match=0.995
-quality=0.8304
+Lightning UI
+-> Machine
+-> Switch to GPU
+-> T4
 ```
 
----
+Puis :
 
-## Métriques principales
+```bash
+nvidia-smi
 
-| Métrique        | Description                                               |
-| ---------------- | --------------------------------------------------------- |
-| `mAP50`        | qualité de détection avec IoU 0.50                      |
-| `mAP75`        | qualité de détection avec IoU 0.75                      |
-| `MAE`          | erreur moyenne sur les coins                              |
-| `RMSE`         | erreur quadratique moyenne sur les coins                  |
-| `PCK2`         | coins à moins de 2 px                                    |
-| `PCK4`         | coins à moins de 4 px                                    |
-| `PCK8`         | coins à moins de 8 px                                    |
-| `match_recall` | proportion d'objets correctement associés                |
-| `quality`      | score global utilisé pour choisir le meilleur checkpoint |
+python -c "import torch; \
+print(torch.cuda.is_available()); \
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'aucun')"
+```
 
----
-
-## Entraînement multi-GPU
-
-Le notebook lance un processus par GPU avec PyTorch DDP :
+Enfin ouvrir :
 
 ```text
-Rank 0 -> GPU 0
-Rank 1 -> GPU 1
+train/PlankEye_Training_Lightning.ipynb
 ```
 
-Configuration attendue :
+et exécuter les cellules dans l'ordre.
+
+---
+
+## 26. Sécurité
+
+Ne jamais versionner :
 
 ```text
-world_size=2
-batch/GPU=8
-accum=1
-batch global=16
+KAGGLE_API_TOKEN
+KGAT_...
+~/.kaggle/access_token
+~/.kaggle/kaggle.json
 ```
 
-Le modèle utilise également :
+Vérifier `.gitignore` si nécessaire.
 
-```python
-find_unused_parameters=True
+Exemple :
+
+```gitignore
+.kaggle/
+*.token
+.env
+.env.*
 ```
 
-pour gérer les paramètres qui ne participent pas à toutes les branches de loss.
+Les datasets et checkpoints lourds doivent de préférence être stockés dans Kaggle ou un stockage dédié plutôt que dans l'historique Git classique.
 
 ---
 
-## Dépendances principales
-
-- Python
-- PyTorch
-- torchvision
-- NumPy
-- Pillow
-- matplotlib
-- tqdm
-- Kaggle CLI
-
-Kaggle fournit déjà la majorité de ces dépendances.
-
----
-
-## Lancement
-
-Le plus simple est d'utiliser directement :
+## 27. Workflow recommandé
 
 ```text
-train/PlankEye_Training_2xT4_Kaggle.ipynb
+GitHub
+  |
+  | code
+  v
+Kaggle / Lightning
+  |
+  | téléchargement dataset max778/plankeye
+  v
+Préparation
+  |
+  | vérification images / labels / checkpoints
+  v
+GPU
+  |
+  | Kaggle : 2 × T4
+  | Lightning : 1 × T4
+  v
+Entraînement
+  |
+  +--> last checkpoint
+  |
+  +--> best checkpoint
+  |
+  v
+max778/checkpoints
 ```
 
-dans Kaggle puis d'exécuter les cellules dans l'ordre.
+Ce découpage permet de garder :
 
-Le notebook :
-
-1. vérifie les GPU ;
-2. prépare le dataset ;
-3. sélectionne le checkpoint le plus récent ;
-4. prépare le modèle ;
-5. écrit le script d'entraînement ;
-6. vérifie sa syntaxe ;
-7. lance DDP sur les 2 T4 ;
-8. sauvegarde `best.pt` et `last.pt` ;
-9. permet une sauvegarde persistante/manuelle des checkpoints.
-
----
-
-## Notes
-
-Le fichier `model/model.py` doit correspondre au fichier importé par le notebook.
-Si le notebook attend un nom différent, adapter le chemin ou le nom copié dans `/kaggle/working`.
-
-Les checkpoints `.pt` ne sont pas inclus dans ce dépôt Git afin d'éviter de versionner des fichiers binaires volumineux.
+- le **code** dans GitHub ;
+- le **dataset lourd** dans Kaggle ;
+- les **checkpoints persistants** dans Kaggle ;
+- l'environnement d'entraînement interchangeable entre Kaggle et Lightning AI.
