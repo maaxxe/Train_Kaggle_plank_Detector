@@ -1,3 +1,4 @@
 *.txt
 *.jpg
 /teamspace/studios/this_studio/Train_Kaggle_plank_Detector/dataset
+*.pyc
