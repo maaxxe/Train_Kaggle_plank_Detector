@@ -896,19 +896,19 @@ git pull
 
 ## 24. Résumé Kaggle / Lightning AI
 
-| Élément | Kaggle | Lightning AI |
-|---|---|---|
-| Notebook | `PlankEye_Training_2xT4_Kaggle.ipynb` | `PlankEye_Training_Lightning.ipynb` |
-| Chemins | `/kaggle/...` | `/teamspace/studios/this_studio/...` |
-| GPU prévu | 2 × T4 | 1 × T4 |
-| Batch/GPU | 8 | 8 |
-| Accumulation | 1 | 2 |
-| Batch effectif/global | 16 | 16 |
-| Dataset | Input Kaggle | téléchargement via Kaggle CLI |
-| Dataset ID | `max778/plankeye` | `max778/plankeye` |
-| Checkpoints | `max778/checkpoints` | `model_poids/` + sauvegarde Kaggle possible |
-| DDP | oui, 2 GPU | automatique si plusieurs GPU |
-| Reprise | `last_...pt` | `last_...pt` |
+| Élément             | Kaggle                                  | Lightning AI                                  |
+| --------------------- | --------------------------------------- | --------------------------------------------- |
+| Notebook              | `PlankEye_Training_2xT4_Kaggle.ipynb` | `PlankEye_Training_Lightning.ipynb`         |
+| Chemins               | `/kaggle/...`                         | `/teamspace/studios/this_studio/...`        |
+| GPU prévu            | 2 × T4                                 | 1 × T4                                       |
+| Batch/GPU             | 8                                       | 8                                             |
+| Accumulation          | 1                                       | 2                                             |
+| Batch effectif/global | 16                                      | 16                                            |
+| Dataset               | Input Kaggle                            | téléchargement via Kaggle CLI               |
+| Dataset ID            | `max778/plankeye`                     | `max778/plankeye`                           |
+| Checkpoints           | `max778/checkpoints`                  | `model_poids/` + sauvegarde Kaggle possible |
+| DDP                   | oui, 2 GPU                              | automatique si plusieurs GPU                  |
+| Reprise               | `last_...pt`                          | `last_...pt`                                |
 
 ---
 
