@@ -35,7 +35,7 @@ from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
 # Configuration modèle
 # -----------------------------------------------------------------------------
 print("[PlankEye v3] configuration : MobileNetV3-Large + BiFPN + refiner stride 2 ")
-print("============================ Depart 1 classe ============================= ")
+print("============================ Depart 1 classe ======GIT======================= ")
 NUM_CLASSES = 1
 N_CORNERS = 4
 CLASS_NAMES = ["planche"]
