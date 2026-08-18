@@ -9,6 +9,118 @@ Le dépôt contient le code du modèle, les notebooks d'entraînement, les check
 
 ---
 
+# 0. Cloner GIT dans Kaggle
+
+from kaggle_secrets import UserSecretsClient
+import subprocess
+import os
+
+token = UserSecretsClient().get_secret("GITHUB_TOKEN")
+
+os.chdir("/kaggle/working")
+
+subprocess.run(["rm", "-rf", "Train_Kaggle_plank_Detector"])
+
+url = f"https://maaxxe:{token}@github.com/maaxxe/Train_Kaggle_plank_Detector.git"
+
+subprocess.run(
+    ["git", "clone", url],
+    check=True
+)
+
+os.chdir("/kaggle/working/Train_Kaggle_plank_Detector")
+
+subprocess.run(["git", "status"])
+subprocess.run(["git", "log", "--oneline", "-5"])
+
+
+
+%cd /kaggle/working/Train_Kaggle_plank_Detector
+!ls
+
+# Atente:
+
+/kaggle/working
+dataset  model_improved.py  README.md  train_plankeye_lightning.py
+model	 model_poids	    train      voir_epoch.py
+
+
+Skip to
+content
+
+    Home
+
+    Competitions
+
+    Benchmarks
+
+    Game Arena
+
+    Data Hub
+
+    More
+
+​
+
+Draft saved
+Draft Session
+No Accelerator
+Session
+3m
+12 hours
+Disk
+347.8MiB
+Max 57.6GiB
+CPU
+CPU
+0.00%
+RAM
+607.7MiB
+Max 30GiB
+Notebook
+Input
+DATASETS
+
+    checkpoints
+
+Output (203.7MiB / 19.5GiB)
+
+    /kaggle/working
+
+Table of contents
+No sections detected
+
+Add markdown headers to add a section
+Session options
+Accelerator
+
+Language
+Persistence
+Environment
+
+You won't get new packages, but your code is less likely to break. What is a notebook environment?
+Internet
+Internet on
+Tags
+Dependency Manager
+
+Some accelerators, such as TPUs, require identity verification. Verify identity
+GitHub
+
+Upload this ipynb to GitHub under your GitHub account . This can only be undone directly on GitHub.
+​
+File
+
+Schedule a notebook to run
+
+Schedule this notebook to run and save a new version on a future date. View all your scheduled notebooks.
+Trigger
+
+Something went wrong please try again later.
+
+
+
+
 ## 1. Structure du dépôt
 
 ```text
