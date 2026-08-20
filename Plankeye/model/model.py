@@ -893,12 +893,12 @@ def combined_loss_v2(
     batch_objects,
     class_weights: Optional[torch.Tensor] = None,
     w_hmap: float = 1.0,
-    w_corner: float = 6.0,
-    w_offset: float = 0.45,
-    w_area: float = 0.20,
-    w_edge_length: float = 0.25,
-    w_edge_direction: float = 0.04,
-    w_consistency: float = 0.20,
+    w_corner: float = 10.0,
+    w_offset: float = 0.35,
+    w_area: float = 0.10,
+    w_edge_length: float = 0.15,
+    w_edge_direction: float = 0.02,
+    w_consistency: float = 0.10,
 ):
     """Loss combinée orientée précision des coins."""
     B, C, H, W = heatmap_logits.shape
