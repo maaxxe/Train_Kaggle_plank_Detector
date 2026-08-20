@@ -42,7 +42,7 @@ CLASS_NAMES = ["planche"]
 
 # 640 conserve sensiblement plus de détail que 512 tout en restant raisonnable
 # avec MobileNetV3 + AMP et un batch de 2 sur la majorité des GPU dédiés.
-IMG_SIZE = 640
+IMG_SIZE = 512
 PRED_STRIDE = 2
 HEATMAP_SIZE = IMG_SIZE // PRED_STRIDE
 
