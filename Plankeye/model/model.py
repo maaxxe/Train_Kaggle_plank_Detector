@@ -32,17 +32,13 @@ Format label :
 
 avec coordonnées normalisées dans [0, 1].
 
-
-
-Letterbox obligatoire : utiliser la même transformation à l'entraînement et à l'inférence.
-
 """
 
 from __future__ import annotations
 
 import math
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -56,16 +52,15 @@ from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Configuration modèle*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
-print("[PlankEye v4] configuration : MobileNetV3-Large + BiFPN + refiner stride 2 ")
-print("============================  NEW_VERSION   ============================= ")
+print("[PlankEye v3] configuration : MobileNetV3-Large + BiFPN + refiner stride 2 ")
 
-print("============================ Depart 1 classe ============================= ")
+print("============================ Depart 1 classe ======GIT_model1================== ")
 
 NUM_CLASSES = 1
 
@@ -73,7 +68,7 @@ N_CORNERS = 4
 
 CLASS_NAMES = ["planche"]
 
-# 512 conserve sensiblement plus de détail que 384 tout en restant raisonnable*
+# 640 conserve sensiblement plus de détail que 512 tout en restant raisonnable*
 
 # avec MobileNetV3 + AMP et un batch de 2 sur la majorité des GPU dédiés.*
 
@@ -100,10 +95,6 @@ DEFAULT_NMS_IOU_THRESH = 0.42
 DEFAULT_CROSS_CLASS_NMS_IOU = 0.82
 
 HEAD_DROPOUT = 0.05
-
-MIN_QUAD_AREA = 1e-5
-MIN_EDGE_LENGTH = 1e-4
-CORNER_MIN_DISTANCE = 1e-5
 
 # Niveaux MobileNetV3-Large vérifiés par probe dynamique.*
 
@@ -139,13 +130,25 @@ _CORNER_PERMUTATIONS = torch.tensor(
 
 )
 
+# Cache des permutations par device : évite une copie CPU->GPU à chaque batch.
+_CORNER_PERMUTATIONS_CACHE = {}
 
 
-# -----------------------------------------------------------------------------
+def _get_corner_permutations(device: torch.device) -> torch.Tensor:
+    key = (device.type, device.index)
+    perms = _CORNER_PERMUTATIONS_CACHE.get(key)
+    if perms is None:
+        perms = _CORNER_PERMUTATIONS.to(device=device)
+        _CORNER_PERMUTATIONS_CACHE[key] = perms
+    return perms
+
+
+
+# -----------------------------------------------------------------------------*
 
 # Backbone*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 class MobileNetV3Backbone(nn.Module):
 
@@ -219,11 +222,11 @@ class MobileNetV3Backbone(nn.Module):
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Blocs réseau*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 def _norm(channels: int, groups: int = 16) -> nn.GroupNorm:
 
@@ -339,11 +342,11 @@ class ResidualDepthwiseBlock(nn.Module):
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # BiFPN stride 4*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 class BiFPNBlock(nn.Module):
 
@@ -509,11 +512,11 @@ class BiFPNNeck(nn.Module):
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Raffinement haute résolution stride 2*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 class HighResolutionRefiner(nn.Module):
 
@@ -577,11 +580,11 @@ class HighResolutionRefiner(nn.Module):
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Têtes de prédiction*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 class PredictionTower(nn.Module):
 
@@ -617,7 +620,7 @@ class HeatmapHead(nn.Module):
 
         nn.init.normal_(self.out.weight, std=1e-3)
 
-        nn.init.constant_(self.out.bias, -4.595)  # p initiale ≈ 1 % (heatmap 256×256 très sparse)*
+        nn.init.constant_(self.out.bias, -4.595)  # p initiale ≈ 1 % (heatmap 256×256 très sparse)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -673,11 +676,11 @@ class CenterOffsetHead(nn.Module):
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Modèle principal*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 class PlankEyeV2(nn.Module):
 
@@ -907,10 +910,6 @@ class PlankEyeV2(nn.Module):
 
         cross_class_nms_iou: float = DEFAULT_CROSS_CLASS_NMS_IOU,
 
-        original_sizes: Optional[Sequence[Tuple[int, int]]] = None,
-
-        output_pixels: bool = False,
-
     ):
 
         was_training = self.training
@@ -931,16 +930,16 @@ class PlankEyeV2(nn.Module):
 
             cross_class_nms_iou=cross_class_nms_iou,
 
-            original_sizes=original_sizes,
-
-            output_pixels=output_pixels,
-
         )
 
         self.train(was_training)
 
         return detections
 
+
+
+# Nom explicite de l'architecture actuelle.
+PlankEyeV3 = PlankEyeV2
 
 
 def build_model(
@@ -975,71 +974,11 @@ def build_model(
 
 
 
-# -----------------------------------------------------------------------------
-
-
-# -----------------------------------------------------------------------------
-# Letterbox / coordonnées
-# -----------------------------------------------------------------------------
-
-def compute_letterbox(
-    original_width: int,
-    original_height: int,
-    input_size: int = IMG_SIZE,
-) -> Tuple[float, int, int, int, int]:
-    """Retourne scale, new_w, new_h, pad_x, pad_y."""
-    ow, oh = int(original_width), int(original_height)
-    if ow <= 0 or oh <= 0:
-        raise ValueError(f"Dimensions invalides: {ow}x{oh}")
-    scale = min(float(input_size) / ow, float(input_size) / oh)
-    new_w = max(1, int(round(ow * scale)))
-    new_h = max(1, int(round(oh * scale)))
-    pad_x = (int(input_size) - new_w) // 2
-    pad_y = (int(input_size) - new_h) // 2
-    return scale, new_w, new_h, pad_x, pad_y
-
-
-def letterbox_corners_to_model(
-    corners: np.ndarray,
-    original_width: int,
-    original_height: int,
-    input_size: int = IMG_SIZE,
-) -> np.ndarray:
-    """Coins normalisés image originale -> coordonnées normalisées modèle."""
-    pts = np.asarray(corners, dtype=np.float32).reshape(4, 2)
-    scale, _nw, _nh, pad_x, pad_y = compute_letterbox(
-        original_width, original_height, input_size
-    )
-    px = pts.copy()
-    px[:, 0] *= max(int(original_width) - 1, 1)
-    px[:, 1] *= max(int(original_height) - 1, 1)
-    px[:, 0] = px[:, 0] * scale + pad_x
-    px[:, 1] = px[:, 1] * scale + pad_y
-    return np.clip(px / max(int(input_size) - 1, 1), 0.0, 1.0).astype(np.float32)
-
-
-def model_corners_to_original_pixels(
-    corners: np.ndarray,
-    original_width: int,
-    original_height: int,
-    input_size: int = IMG_SIZE,
-) -> np.ndarray:
-    """Coins normalisés modèle -> pixels image originale."""
-    pts = np.asarray(corners, dtype=np.float32).reshape(4, 2)
-    scale, _nw, _nh, pad_x, pad_y = compute_letterbox(
-        original_width, original_height, input_size
-    )
-    px = pts.copy() * max(int(input_size) - 1, 1)
-    px[:, 0] = (px[:, 0] - pad_x) / max(scale, 1e-12)
-    px[:, 1] = (px[:, 1] - pad_y) / max(scale, 1e-12)
-    px[:, 0] = np.clip(px[:, 0], 0.0, max(int(original_width) - 1, 0))
-    px[:, 1] = np.clip(px[:, 1], 0.0, max(int(original_height) - 1, 0))
-    return px.astype(np.float32)
-
+# -----------------------------------------------------------------------------*
 
 # Targets CenterNet*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 def gaussian_radius(height: float, width: float, min_overlap: float = MIN_OVERLAP) -> float:
 
@@ -1141,7 +1080,7 @@ def build_targets(
 
     num_classes: int = NUM_CLASSES,
 
-    device: torch.device | str = "cpu",
+    device: Union[torch.device, str] = "cpu",
 
     label_smoothing: float = HEATMAP_LABEL_SMOOTHING,
 
@@ -1355,11 +1294,11 @@ def build_targets(
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Losses*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 def focal_heatmap_loss(
 
@@ -1489,9 +1428,9 @@ def permutation_invariant_corner_loss(
 
     gt = corner_gt_flat.reshape(-1, 4, 2)
 
-    perms = _CORNER_PERMUTATIONS.to(gt.device)
+    perms = _get_corner_permutations(gt.device)
 
-    variants = gt[:, perms, :]  # (N, 8, 4, 2)*
+    variants = gt[:, perms, :]  # (N, 8, 4, 2)
 
     beta_norm = beta_px / float(IMG_SIZE)
 
@@ -1527,7 +1466,7 @@ def permutation_invariant_corner_loss(
 
 
 
-def polygon_area_log_loss(
+def polygon_area_loss(
 
     pred: torch.Tensor,
 
@@ -1563,6 +1502,10 @@ def polygon_area_log_loss(
 
     return _weighted_mean(per_instance, weights)
 
+
+
+# Compatibilité avec les anciens scripts.
+polygon_area_log_loss = polygon_area_loss
 
 
 def edge_geometry_loss(
@@ -1641,15 +1584,15 @@ def combined_loss_v2(
 
     w_hmap: float = 1.0,
 
-    w_corner: float = 6.0,
+    w_corner: float = 10.0,
 
-    w_offset: float = 0.45,
+    w_offset: float = 0.35,
 
-    w_area: float = 0.20,
+    w_area: float = 0.10,
 
-    w_edge_length: float = 0.25,
+    w_edge_length: float = 0.15,
 
-    w_edge_direction: float = 0.04,
+    w_edge_direction: float = 0.02,
 
     w_consistency: float = 0.20,
 
@@ -1743,7 +1686,7 @@ def combined_loss_v2(
 
         gt_pts = aligned_gt
 
-        l_area = polygon_area_log_loss(pred_pts, gt_pts, inst_weights)
+        l_area = polygon_area_loss(pred_pts, gt_pts, inst_weights)
 
         l_edge_len, l_edge_dir = edge_geometry_loss(pred_pts, gt_pts, inst_weights)
 
@@ -1753,22 +1696,21 @@ def combined_loss_v2(
 
         mean_corner = pred_pts.mean(dim=1)
 
-        cell_center_norm = torch.stack(
-            [
-                idx_x.to(pred_pts.dtype) / max(W - 1, 1),
-                idx_y.to(pred_pts.dtype) / max(H - 1, 1),
-            ],
-            dim=1,
-        )
         offset_norm = torch.stack(
+
             [
+
                 offset_at_pos[:, 0] / max(W - 1, 1),
+
                 offset_at_pos[:, 1] / max(H - 1, 1),
+
             ],
+
             dim=1,
+
         )
-        predicted_center_norm = cell_center_norm + offset_norm
-        consistency_delta = mean_corner - predicted_center_norm
+
+        consistency_delta = mean_corner - offset_norm
 
         consistency_per = F.smooth_l1_loss(
 
@@ -1782,7 +1724,7 @@ def combined_loss_v2(
 
         ).mean(dim=1)
 
-        l_consistency = 2.0 * _weighted_mean(consistency_per, inst_weights)
+        l_consistency = _weighted_mean(consistency_per, inst_weights)
 
     else:
 
@@ -1838,11 +1780,11 @@ def combined_loss_v2(
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Géométrie polygonale exacte*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 def _cross2(a: np.ndarray, b: np.ndarray) -> float:
 
@@ -2007,78 +1949,51 @@ def _convex_clip(subject: np.ndarray, clip: np.ndarray) -> np.ndarray:
 
 
 def _order_polygon_np(points: np.ndarray) -> np.ndarray:
-    """Ordre circulaire déterministe."""
+
     pts = np.asarray(points, dtype=np.float64).reshape(-1, 2)
-    if len(pts) != 4:
-        raise ValueError(f"Un quadrilatère doit avoir 4 points, reçu {len(pts)}")
+
     center = pts.mean(axis=0)
+
     angles = np.arctan2(pts[:, 1] - center[1], pts[:, 0] - center[0])
+
     return pts[np.argsort(angles)]
 
 
-def canonicalize_corners(points: np.ndarray) -> np.ndarray:
-    """Contrat stable : TL, TR, BR, BL."""
-    pts = _order_polygon_np(points).astype(np.float64)
-    start = int(np.argmin(pts[:, 0] + pts[:, 1]))
-    pts = np.roll(pts, -start, axis=0)
-    if _signed_polygon_area(pts) < 0:
-        pts = pts[[0, 3, 2, 1]]
-    return pts.astype(np.float32)
 
+def _polygon_iou(poly_a: np.ndarray, poly_b: np.ndarray, grid_size: Optional[int] = None) -> float:
 
-def _is_valid_quadrilateral_np(
-    points: np.ndarray,
-    min_area: float = MIN_QUAD_AREA,
-    min_edge: float = MIN_EDGE_LENGTH,
-) -> bool:
-    """4 sommets distincts, arêtes non nulles et convexité stricte."""
-    try:
-        pts = canonicalize_corners(points).astype(np.float64)
-    except (ValueError, TypeError):
-        return False
-    if not np.isfinite(pts).all():
-        return False
+    """IoU exacte des enveloppes convexes. `grid_size` conservé pour compatibilité."""
 
-    for i in range(4):
-        for j in range(i + 1, 4):
-            if np.linalg.norm(pts[i] - pts[j]) < CORNER_MIN_DISTANCE:
-                return False
-
-    edges = np.roll(pts, -1, axis=0) - pts
-    if np.any(np.linalg.norm(edges, axis=1) < min_edge):
-        return False
-
-    crosses = np.array(
-        [_cross2(edges[i], edges[(i + 1) % 4]) for i in range(4)],
-        dtype=np.float64,
-    )
-    if np.any(np.abs(crosses) < min_area):
-        return False
-    if np.any(crosses > 0) and np.any(crosses < 0):
-        return False
-
-    return _polygon_area_np(pts) >= min_area
-
-
-def _polygon_iou(poly_a: np.ndarray, poly_b: np.ndarray, grid_size: int | None = None) -> float:
-    """IoU exacte, uniquement pour des quadrilatères convexes valides."""
     del grid_size
-    if not _is_valid_quadrilateral_np(poly_a) or not _is_valid_quadrilateral_np(poly_b):
+
+    hull_a = _convex_hull(np.asarray(poly_a, dtype=np.float64))
+
+    hull_b = _convex_hull(np.asarray(poly_b, dtype=np.float64))
+
+    if len(hull_a) < 3 or len(hull_b) < 3:
+
         return 0.0
 
-    a = canonicalize_corners(poly_a).astype(np.float64)
-    b = canonicalize_corners(poly_b).astype(np.float64)
-    area_a = _polygon_area_np(a)
-    area_b = _polygon_area_np(b)
+    area_a = _polygon_area_np(hull_a)
+
+    area_b = _polygon_area_np(hull_b)
+
     if area_a <= 1e-12 or area_b <= 1e-12:
+
         return 0.0
 
-    inter_poly = _convex_clip(a, b)
+    inter_poly = _convex_clip(hull_a, hull_b)
+
     inter = _polygon_area_np(inter_poly) if len(inter_poly) >= 3 else 0.0
+
     union = area_a + area_b - inter
+
     if union <= 1e-12:
+
         return 0.0
+
     return float(np.clip(inter / union, 0.0, 1.0))
+
 
 
 def _points_in_polygon(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
@@ -2117,11 +2032,11 @@ def _points_in_polygon(points: np.ndarray, poly: np.ndarray) -> np.ndarray:
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Decode / NMS*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 def _nms_heatmap(heatmap: torch.Tensor, kernel: int = 3) -> torch.Tensor:
 
@@ -2154,10 +2069,16 @@ def _nms_polygons(
     for det in ordered:
 
         suppress = False
+        det_poly = np.asarray(det.get("corners"), dtype=np.float64)
+        if det_poly.shape != (4, 2) or not np.isfinite(det_poly).all():
+            continue
+        det_hull = _convex_hull(det_poly)
+        if len(det_hull) < 3 or _polygon_area_np(det_hull) <= 1e-12:
+            continue
 
         for other in kept:
 
-            iou = _polygon_iou(det["corners"], other["corners"])
+            iou = _polygon_iou(det_poly, other["corners"])
 
             if det["cls"] == other["cls"]:
 
@@ -2186,162 +2107,160 @@ def _nms_polygons(
 
 
 def decode_detections(
-    heatmap_logits: torch.Tensor,
-    corner_pred: torch.Tensor,
-    offset_pred: torch.Tensor,
-    conf_thresh: float = DEFAULT_CONF_THRESH,
-    topk: int = DEFAULT_TOPK,
-    nms_iou_thresh: float = DEFAULT_NMS_IOU_THRESH,
-    cross_class_nms_iou: float = DEFAULT_CROSS_CLASS_NMS_IOU,
-    original_sizes: Optional[Sequence[Tuple[int, int]]] = None,
-    output_pixels: bool = False,
-):
-    """Décode les pics et inverse le letterbox si demandé.
 
-    original_sizes[b] = (width, height). Si output_pixels=True, ``corners``
-    et ``center`` sont exprimés dans le repère pixel de l'image originale.
-    """
+    heatmap_logits: torch.Tensor,
+
+    corner_pred: torch.Tensor,
+
+    offset_pred: torch.Tensor,
+
+    conf_thresh: float = DEFAULT_CONF_THRESH,
+
+    topk: int = DEFAULT_TOPK,
+
+    nms_iou_thresh: float = DEFAULT_NMS_IOU_THRESH,
+
+    cross_class_nms_iou: float = DEFAULT_CROSS_CLASS_NMS_IOU,
+
+):
+
+    """Décode les pics en limitant les synchronisations GPU->CPU."""
+
     B, C, H, W = heatmap_logits.shape
-    if original_sizes is not None and len(original_sizes) != B:
-        raise ValueError(
-            f"original_sizes doit contenir {B} dimensions, reçu {len(original_sizes)}"
-        )
 
     heat = _nms_heatmap(torch.sigmoid(heatmap_logits))
+
     corner_view = corner_pred.view(B, C, 8, H, W)
+
     offset_view = offset_pred.view(B, C, 2, H, W)
+
     scale_x = max(W - 1, 1)
+
     scale_y = max(H - 1, 1)
+
     results = []
 
     for b in range(B):
+
         dets = []
+
         for c in range(C):
+
             scores_flat = heat[b, c].reshape(-1)
+
             k = min(int(topk), scores_flat.numel())
+
             if k <= 0:
+
                 continue
 
             top_scores, top_idx = torch.topk(scores_flat, k)
+
             valid = top_scores >= conf_thresh
+
             if not bool(valid.any()):
+
                 continue
 
             scores = top_scores[valid]
+
             flat_idx = top_idx[valid]
+
             iy = torch.div(flat_idx, W, rounding_mode="floor")
+
             ix = flat_idx.remainder(W)
 
-            offset_logits = offset_view[b, c, :, iy, ix].transpose(0, 1)
+            offset_logits = offset_view[b, c, :, iy, ix].transpose(0, 1)  # (N,2)
+
             center_off = 0.5 * torch.tanh(offset_logits)
-            centers_norm = torch.stack(
+
+            centers = torch.stack(
+
                 [
+
                     (ix.to(center_off.dtype) + center_off[:, 0]) / scale_x,
+
                     (iy.to(center_off.dtype) + center_off[:, 1]) / scale_y,
+
                 ],
+
                 dim=1,
+
             ).clamp(0.0, 1.0)
 
-            corner_vals = (
-                corner_view[b, c, :, iy, ix].transpose(0, 1).reshape(-1, 4, 2)
-            )
+            corner_vals = corner_view[b, c, :, iy, ix].transpose(0, 1).reshape(-1, 4, 2)
+
             cell_centers = torch.stack(
+
                 [
+
                     ix.to(corner_vals.dtype) / scale_x,
+
                     iy.to(corner_vals.dtype) / scale_y,
+
                 ],
+
                 dim=1,
+
             )
-            corners_norm = (
-                corner_vals + cell_centers[:, None, :]
-            ).clamp(0.0, 1.0)
+
+            corners = (corner_vals + cell_centers[:, None, :]).clamp(0.0, 1.0)
 
             scores_np = scores.detach().cpu().numpy()
-            centers_np = centers_norm.detach().cpu().numpy()
-            corners_np = corners_norm.detach().cpu().numpy()
+
+            centers_np = centers.detach().cpu().numpy()
+
+            corners_np = corners.detach().cpu().numpy()
 
             for score, center, poly in zip(scores_np, centers_np, corners_np):
-                if not _is_valid_quadrilateral_np(poly):
+
+                if not np.isfinite(score) or not np.isfinite(center).all() or not np.isfinite(poly).all():
                     continue
 
-                poly_norm = canonicalize_corners(poly)
+                poly = _order_polygon_np(poly).astype(np.float32)
+                hull = _convex_hull(poly)
+                if len(hull) < 3 or _polygon_area_np(hull) < 1e-7:
+                    continue
 
-                if original_sizes is not None:
-                    ow, oh = map(int, original_sizes[b])
-                    poly_pixels = model_corners_to_original_pixels(
-                        poly_norm, ow, oh, input_size=IMG_SIZE
-                    )
-                    scale, _nw, _nh, pad_x, pad_y = compute_letterbox(
-                        ow, oh, IMG_SIZE
-                    )
-                    center_model_px = center * max(IMG_SIZE - 1, 1)
-                    center_pixels = np.array(
-                        [
-                            np.clip(
-                                (center_model_px[0] - pad_x) / max(scale, 1e-12),
-                                0, max(ow - 1, 0)
-                            ),
-                            np.clip(
-                                (center_model_px[1] - pad_y) / max(scale, 1e-12),
-                                0, max(oh - 1, 0)
-                            ),
-                        ],
-                        dtype=np.float32,
-                    )
-                else:
-                    poly_pixels = None
-                    center_pixels = None
+                dets.append(
 
-                det = {
-                    "cls": c,
-                    "score": float(score),
-                    "center": (
-                        center_pixels
-                        if output_pixels and center_pixels is not None
-                        else np.asarray(center, dtype=np.float32)
-                    ),
-                    "corners": (
-                        poly_pixels
-                        if output_pixels and poly_pixels is not None
-                        else poly_norm
-                    ),
-                }
-                if output_pixels and poly_pixels is not None:
-                    det["corners_norm"] = poly_norm
-                dets.append(det)
+                    {
+
+                        "cls": c,
+
+                        "score": float(score),
+
+                        "center": np.asarray(center, dtype=np.float32),
+
+                        "corners": poly,
+
+                    }
+
+                )
 
         results.append(
+
             _nms_polygons(
+
                 dets,
+
                 iou_thresh=nms_iou_thresh,
+
                 cross_class_iou=cross_class_nms_iou,
+
             )
+
         )
+
     return results
 
 
-def detections_to_jsonable(detections, decimals: int = 2) -> List[Dict[str, object]]:
-    """Convertit une liste de détections en contrat JSON minimal.
 
-    Retour :
-    [
-        {"confidence": 0.94, "corners": [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]}
-    ]
-    """
-    out = []
-    for det in detections:
-        corners = np.asarray(det["corners"], dtype=np.float32).reshape(4, 2)
-        out.append(
-            {
-                "confidence": round(float(det["score"]), decimals),
-                "corners": [
-                    [round(float(x), decimals), round(float(y), decimals)]
-                    for x, y in corners
-                ],
-            }
-        )
-    return out
+# -----------------------------------------------------------------------------*
 
+# Métriques*
+
+# -----------------------------------------------------------------------------*
 
 def _compute_ap_at_iou(all_dets, all_gts, num_classes: int, iou_thresh: float):
 
@@ -2453,119 +2372,147 @@ def compute_ap50(all_dets, all_gts, num_classes: int = NUM_CLASSES, iou_thresh: 
 
 
 
-def _best_corner_errors_px(
-    pred: np.ndarray,
-    gt: np.ndarray,
-    image_size: int | Tuple[int, int],
-) -> np.ndarray:
-    """Erreur euclidienne des coins en pixels réels."""
-    pred = canonicalize_corners(pred).astype(np.float32)
-    gt = canonicalize_corners(gt).astype(np.float32)
+def _best_corner_errors_px(pred: np.ndarray, gt: np.ndarray, image_size: int) -> np.ndarray:
 
-    if isinstance(image_size, (tuple, list, np.ndarray)):
-        width, height = float(image_size[0]), float(image_size[1])
-    else:
-        width = height = float(image_size)
+    pred = _order_polygon_np(pred)
 
-    scale = np.array(
-        [max(width - 1.0, 1.0), max(height - 1.0, 1.0)],
-        dtype=np.float32,
-    )
+    gt = _order_polygon_np(gt)
 
-    variants = [np.roll(gt, -shift, axis=0) for shift in range(4)]
+    variants = []
+
+    for shift in range(4):
+
+        variants.append(np.roll(gt, -shift, axis=0))
+
     gt_rev = gt[::-1]
-    variants += [np.roll(gt_rev, -shift, axis=0) for shift in range(4)]
 
-    errors = [np.linalg.norm((pred - v) * scale, axis=1) for v in variants]
+    for shift in range(4):
+
+        variants.append(np.roll(gt_rev, -shift, axis=0))
+
+    errors = [np.linalg.norm(pred - v, axis=1) * image_size for v in variants]
+
     mean_errors = [float(e.mean()) for e in errors]
+
     return errors[int(np.argmin(mean_errors))]
 
 
+
 def compute_corner_metrics(
+
     all_dets,
+
     all_gts,
-    image_sizes: Optional[Sequence[Tuple[int, int]]] = None,
+
     image_size: int = IMG_SIZE,
+
     match_iou_thresh: float = 0.30,
+
 ):
-    """Mesure les quatre coins en pixels de l'image originale."""
-    if image_sizes is not None and len(image_sizes) != len(all_gts):
-        raise ValueError(
-            f"image_sizes doit contenir {len(all_gts)} dimensions, reçu {len(image_sizes)}"
-        )
+
+    """Mesure directement l'erreur des quatre sommets sur les détections appariées."""
 
     all_corner_errors: List[float] = []
+
     matched_objects = 0
+
     total_gt = 0
 
-    for img_idx, (dets, gts) in enumerate(zip(all_dets, all_gts)):
+    for dets, gts in zip(all_dets, all_gts):
+
         total_gt += len(gts)
+
         used = [False] * len(dets)
-        current_size = image_sizes[img_idx] if image_sizes is not None else image_size
 
         for gt in gts:
+
             gt_cls = int(gt["cls"])
+
             gt_poly = np.asarray(gt["corners"], dtype=np.float32)
+
             best_iou = 0.0
+
             best_j = -1
 
             for j, det in enumerate(dets):
+
                 if used[j] or int(det["cls"]) != gt_cls:
+
                     continue
+
                 iou = _polygon_iou(np.asarray(det["corners"]), gt_poly)
+
                 if iou > best_iou:
+
                     best_iou = iou
+
                     best_j = j
 
             if best_j < 0 or best_iou < match_iou_thresh:
+
                 continue
 
             used[best_j] = True
+
             matched_objects += 1
+
             errs = _best_corner_errors_px(
-                np.asarray(dets[best_j]["corners"]),
-                gt_poly,
-                current_size,
+
+                np.asarray(dets[best_j]["corners"]), gt_poly, image_size
+
             )
+
             all_corner_errors.extend(errs.tolist())
 
     if not all_corner_errors:
+
         return {
+
             "corner_mae_px": float("inf"),
+
             "corner_rmse_px": float("inf"),
+
             "pck2": 0.0,
+
             "pck4": 0.0,
+
             "pck8": 0.0,
+
             "matched_objects": 0,
+
             "match_recall": 0.0,
+
         }
 
     arr = np.asarray(all_corner_errors, dtype=np.float64)
+
     return {
+
         "corner_mae_px": float(arr.mean()),
+
         "corner_rmse_px": float(np.sqrt(np.mean(arr ** 2))),
+
         "pck2": float(np.mean(arr <= 2.0)),
+
         "pck4": float(np.mean(arr <= 4.0)),
+
         "pck8": float(np.mean(arr <= 8.0)),
+
         "matched_objects": int(matched_objects),
+
         "match_recall": float(matched_objects / max(total_gt, 1)),
+
     }
 
 
-def compute_detection_metrics(
-    all_dets,
-    all_gts,
-    num_classes: int = NUM_CLASSES,
-    image_sizes: Optional[Sequence[Tuple[int, int]]] = None,
-):
+
+def compute_detection_metrics(all_dets, all_gts, num_classes: int = NUM_CLASSES):
+
     map50, ap50 = _compute_ap_at_iou(all_dets, all_gts, num_classes, 0.50)
+
     map75, ap75 = _compute_ap_at_iou(all_dets, all_gts, num_classes, 0.75)
-    corner = compute_corner_metrics(
-        all_dets,
-        all_gts,
-        image_sizes=image_sizes,
-        image_size=IMG_SIZE,
-    )
+
+    corner = compute_corner_metrics(all_dets, all_gts, image_size=IMG_SIZE)
 
     return {
 
@@ -2583,11 +2530,11 @@ def compute_detection_metrics(
 
 
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 # Smoke test*
 
-# -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------*
 
 if __name__ == "__main__":
 
