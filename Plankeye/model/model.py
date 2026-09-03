@@ -59,6 +59,7 @@ from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
 # -----------------------------------------------------------------------------*
 
 print("[PlankEye v3] configuration : MobileNetV3-Large + BiFPN + refiner stride 2 ")
+print("============================ Version 4================== ")
 
 print("============================ Depart 1 classe ======GIT_model1================== ")
 
