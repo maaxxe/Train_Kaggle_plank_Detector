@@ -275,7 +275,7 @@ def focal_heatmap_loss(pred, target):
 
 
 def permutation_corner_loss(pred_corners, target_corners, positive_mask):
-    B, C, _, H, W = target_corners.shape
+    B, C, _, _, H, W = target_corners.shape
     pred = pred_corners.view(B, C, 4, 2, H, W)
     mask = positive_mask.bool()
 
@@ -319,7 +319,7 @@ def polygon_area_torch(points):
 
 
 def geometry_loss(pred_corners, target_corners, positive_mask):
-    B, C, _, H, W = target_corners.shape
+    B, C, _, _, H, W = target_corners.shape
     pred = pred_corners.view(B, C, 4, 2, H, W)
     mask = positive_mask.bool()
 
