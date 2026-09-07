@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 from torchvision.models import resnet18, ResNet18_Weights
 
-
+print("============================PlankEye V5 model loaded TEST============================")
 # =============================================================================
 # PARAMÈTRES PARTAGÉS
 # =============================================================================
@@ -277,7 +277,7 @@ def focal_heatmap_loss(pred, target):
 def permutation_corner_loss(pred_corners, target_corners, positive_mask):
     B, C, _, _, H, W = target_corners.shape
     pred = pred_corners.view(B, C, 4, 2, H, W)
-    mask = positive_mask.bool()
+    mask = positive_mask.bool().unsqueeze(2).unsqueeze(3).expand(-1, -1, 4, 2, -1, -1)
 
     if mask.sum() == 0:
         return pred.sum() * 0.0
@@ -298,7 +298,6 @@ def permutation_corner_loss(pred_corners, target_corners, positive_mask):
 
 
 def offset_loss(pred_offsets, target_offsets, positive_mask):
-    # CORRECTIF: Alignement des shapes de pred_offsets et target_offsets
     pred = pred_offsets.view(target_offsets.shape) 
     mask = positive_mask.unsqueeze(2)
 
@@ -321,7 +320,7 @@ def polygon_area_torch(points):
 def geometry_loss(pred_corners, target_corners, positive_mask):
     B, C, _, _, H, W = target_corners.shape
     pred = pred_corners.view(B, C, 4, 2, H, W)
-    mask = positive_mask.bool()
+    mask = positive_mask.bool().unsqueeze(2).unsqueeze(3).expand(-1, -1, 4, 2, -1, -1)
 
     if mask.sum() == 0:
         return pred.sum() * 0.0
@@ -398,7 +397,6 @@ def decode_predictions(hmap, corners, offsets, score_thresh=0.3, topk=50):
     B, C, H, W = hmap.shape
     prob = hmap.sigmoid()
 
-    # CORRECTIF: NMS CenterNet standard via max-pooling 3x3
     keep_map = (prob == F.max_pool2d(prob, kernel_size=3, stride=1, padding=1))
     prob = prob * keep_map
 
@@ -407,7 +405,6 @@ def decode_predictions(hmap, corners, offsets, score_thresh=0.3, topk=50):
     for b in range(B):
         detections = []
 
-        # CORRECTIF: Support du multi-classes
         for c in range(C):
             p = prob[b, c]
 
@@ -433,7 +430,6 @@ def decode_predictions(hmap, corners, offsets, score_thresh=0.3, topk=50):
 
                 quad = torch.stack([corner_x, corner_y], dim=1)
 
-                # CORRECTIF: Tri angulaire déterministe
                 centroid = quad.mean(dim=0)
                 angles = torch.atan2(quad[:, 1] - centroid[1], quad[:, 0] - centroid[0])
                 order = torch.argsort(angles)
