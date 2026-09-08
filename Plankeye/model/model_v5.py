@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 from torchvision.models import resnet18, ResNet18_Weights
 
-print("============================PlankEye V5 model loaded TEST============================")
+print("============================PlankEye V5 model loaded TEST V2============================")
 # =============================================================================
 # PARAMÈTRES PARTAGÉS
 # =============================================================================
