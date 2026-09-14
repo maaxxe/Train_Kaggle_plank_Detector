@@ -20,7 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import ResNet18_Weights, resnet18
 
-MODEL_VERSION = "v5.2-absolute-corners"
+MODEL_VERSION = "v5.2-absolute-corners" 
 IMG_SIZE = 512
 PRED_STRIDE = 2
 HEATMAP_SIZE = IMG_SIZE // PRED_STRIDE
