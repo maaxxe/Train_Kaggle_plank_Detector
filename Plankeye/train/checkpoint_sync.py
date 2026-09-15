@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
+print("====================Checkpoint_Sync_v7=====================")
 
 SMALL_FILES = (
     "dataset_split.json",
@@ -142,7 +142,15 @@ def fetch_dataset_metadata(
     dataset: str,
     stage_dir: Path,
 ) -> None:
-    """Download official metadata for the existing Kaggle Dataset."""
+    """Prepare metadata for versioning an existing Kaggle Dataset.
+
+    Some Kaggle CLI versions successfully download dataset-metadata.json but
+    omit the `id`/slug field required by `kaggle datasets version`.  Therefore
+    we fetch the official metadata when possible, then *always* enforce the
+    existing dataset slug locally before versioning.
+    """
+    metadata_path = stage_dir / "dataset-metadata.json"
+
     command = [
         kaggle_cli,
         "datasets",
@@ -159,25 +167,47 @@ def fetch_dataset_metadata(
         stderr=subprocess.STDOUT,
     )
 
-    if result.returncode != 0:
+    metadata = {}
+
+    if result.returncode == 0 and metadata_path.exists():
+        try:
+            loaded = json.loads(
+                metadata_path.read_text(encoding="utf-8")
+            )
+            if isinstance(loaded, dict):
+                metadata = loaded
+        except Exception:
+            metadata = {}
+
+    # CRITICAL: `kaggle datasets version` requires one of `id` or `id_no`.
+    # Force the canonical owner/slug even if the installed CLI omitted it.
+    metadata["id"] = dataset
+
+    # `title` is not required for a version, but keeping a valid fallback makes
+    # the metadata easier to inspect and remains compatible with older CLIs.
+    if not metadata.get("title"):
+        metadata["title"] = dataset.split("/", 1)[-1]
+
+    metadata_path.write_text(
+        json.dumps(
+            metadata,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # Final local validation before trying a ~1 GB upload.
+    check = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not check.get("id") and not check.get("id_no"):
         raise RuntimeError(
-            "Impossible de récupérer dataset-metadata.json depuis Kaggle.\n"
-            + result.stdout
+            "dataset-metadata.json invalide : aucun 'id' ou 'id_no'."
         )
 
-    metadata_path = stage_dir / "dataset-metadata.json"
-    if not metadata_path.exists():
-        # Fallback for CLI/environment variants. Existing dataset versioning
-        # fundamentally needs the dataset id in metadata.
-        metadata_path.write_text(
-            json.dumps(
-                {
-                    "id": dataset,
-                    "title": dataset.split("/", 1)[-1],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+    if check.get("id") != dataset and not check.get("id_no"):
+        raise RuntimeError(
+            "dataset-metadata.json pointe vers un autre dataset : "
+            f"{check.get('id')!r} != {dataset!r}"
         )
 
 
