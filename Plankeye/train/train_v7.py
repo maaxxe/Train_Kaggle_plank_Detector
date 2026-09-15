@@ -74,7 +74,7 @@ from model_v7 import (
     model_metadata,
 )
 
-print("====================Model_V7_0======================")
+print("====================Train_V7_1=====================")
 
 # =============================================================================
 # GLOBAL SETTINGS
@@ -1761,6 +1761,121 @@ def save_history_files(output_dir: Path, history: Sequence[dict]) -> None:
 
 
 # =============================================================================
+# OPTIONAL KAGGLE CHECKPOINT BACKUP
+# =============================================================================
+
+
+def poll_kaggle_upload(
+    process: subprocess.Popen | None,
+    log_handle,
+    *,
+    rank: int,
+):
+    """Report completion of a previously launched Kaggle upload."""
+    if process is None:
+        return None, log_handle
+
+    return_code = process.poll()
+    if return_code is None:
+        return process, log_handle
+
+    if log_handle is not None:
+        try:
+            log_handle.flush()
+            log_handle.close()
+        except Exception:
+            pass
+        log_handle = None
+
+    if rank == 0:
+        if return_code == 0:
+            print("✅ Upload Kaggle précédent terminé avec succès.")
+        else:
+            print(
+                "⚠️ Upload Kaggle précédent terminé avec le code "
+                f"{return_code}. Le training continue."
+            )
+
+    return None, log_handle
+
+
+def start_kaggle_upload(
+    *,
+    output_dir: Path,
+    dataset: str,
+    epoch_human: int,
+    rank: int,
+    previous_process: subprocess.Popen | None,
+    previous_log_handle,
+):
+    """Launch checkpoint_sync.py in background from rank 0 only.
+
+    A background process is used deliberately: rank 1 never has to sit inside a
+    long NCCL barrier while a ~500 MB checkpoint upload is in progress.
+    """
+    if rank != 0:
+        return previous_process, previous_log_handle
+
+    previous_process, previous_log_handle = poll_kaggle_upload(
+        previous_process,
+        previous_log_handle,
+        rank=rank,
+    )
+
+    if previous_process is not None:
+        print(
+            "⚠️ Upload Kaggle encore en cours : "
+            f"epoch {epoch_human} non envoyé pour éviter deux uploads concurrents."
+        )
+        return previous_process, previous_log_handle
+
+    sync_script = Path(__file__).resolve().parent / "checkpoint_sync.py"
+    if not sync_script.exists():
+        print(
+            f"⚠️ {sync_script.name} introuvable : "
+            "backup Kaggle automatique ignoré."
+        )
+        return None, previous_log_handle
+
+    log_path = output_dir / f"kaggle_upload_epoch_{epoch_human:03d}.log"
+    log_handle = log_path.open("w", encoding="utf-8")
+
+    command = [
+        sys.executable,
+        str(sync_script),
+        "--run-dir",
+        str(output_dir),
+        "--dataset",
+        dataset,
+        "--epoch",
+        str(epoch_human),
+        "--message",
+        f"PlankEye V7 - checkpoint epoch {epoch_human}",
+    ]
+
+    print()
+    print(
+        f"☁️  Upload Kaggle lancé en arrière-plan : "
+        f"{dataset} (epoch {epoch_human})"
+    )
+    print(f"    Log : {log_path}")
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parent),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+    except Exception:
+        log_handle.close()
+        raise
+
+    return process, log_handle
+
+
+# =============================================================================
 # MODEL CONSTRUCTION
 # =============================================================================
 
@@ -1857,6 +1972,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--resume", type=str, default="", help="Checkpoint path or 'auto'.")
+
+    # Optional automatic backup to an existing Kaggle Dataset.
+    # Only rank 0 starts the upload, and it runs in a background subprocess so
+    # DDP training does not wait for the network upload.
+    parser.add_argument(
+        "--kaggle-dataset",
+        type=str,
+        default="",
+        help="Existing Kaggle Dataset slug, e.g. max778/chekpoints-backbone50.",
+    )
+    parser.add_argument(
+        "--kaggle-upload-every",
+        type=int,
+        default=0,
+        help="Create a Kaggle Dataset version every N completed epochs. 0 disables it.",
+    )
+
     parser.add_argument("--patience", type=int, default=0, help="0 disables early stopping.")
 
     parser.add_argument("--no-pretrained", action="store_true")
@@ -1890,6 +2022,12 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--backbone-lr-mult must be in (0,1]")
     if args.save_every < 0:
         raise ValueError("--save-every must be >= 0")
+    if args.kaggle_upload_every < 0:
+        raise ValueError("--kaggle-upload-every must be >= 0")
+    if args.kaggle_upload_every > 0 and not args.kaggle_dataset.strip():
+        raise ValueError(
+            "--kaggle-dataset is required when --kaggle-upload-every > 0"
+        )
 
     if args.unfreeze_layer4_epoch < 1:
         raise ValueError("--unfreeze-layer4-epoch must be >= 1")
@@ -1918,6 +2056,11 @@ def main() -> None:
     validate_args(args)
 
     distributed, rank, local_rank, world_size, device = setup_distributed()
+
+    # Defined before entering the main try/finally so an early failure cannot
+    # mask the original exception during cleanup.
+    kaggle_upload_process = None
+    kaggle_upload_log_handle = None
 
     try:
         seed_everything(args.seed + rank)
@@ -2153,6 +2296,13 @@ def main() -> None:
             print(f"Backbone LR            : {args.lr * args.backbone_lr_mult:.3e}")
             print(f"Warmup steps           : {effective_warmup_steps}")
             print(f"Total optimizer steps  : {total_scheduler_steps}")
+            if args.kaggle_upload_every > 0:
+                print(
+                    "Kaggle backup          : "
+                    f"{args.kaggle_dataset} every {args.kaggle_upload_every} epochs"
+                )
+            else:
+                print("Kaggle backup          : disabled")
             print(f"Device                 : {device}")
             if torch.cuda.is_available():
                 for idx, name in enumerate(runtime["gpu_names"]):
@@ -2404,6 +2554,22 @@ def main() -> None:
 
                 save_history_files(args.output, history)
 
+                if (
+                    args.kaggle_upload_every > 0
+                    and (epoch + 1) % args.kaggle_upload_every == 0
+                ):
+                    (
+                        kaggle_upload_process,
+                        kaggle_upload_log_handle,
+                    ) = start_kaggle_upload(
+                        output_dir=args.output,
+                        dataset=args.kaggle_dataset.strip(),
+                        epoch_human=epoch + 1,
+                        rank=rank,
+                        previous_process=kaggle_upload_process,
+                        previous_log_handle=kaggle_upload_log_handle,
+                    )
+
             if distributed:
                 barrier()
 
@@ -2416,6 +2582,16 @@ def main() -> None:
             if distributed:
                 dist.broadcast(stop_tensor, src=0)
             should_stop = bool(stop_tensor.item())
+
+            if rank == 0:
+                (
+                    kaggle_upload_process,
+                    kaggle_upload_log_handle,
+                ) = poll_kaggle_upload(
+                    kaggle_upload_process,
+                    kaggle_upload_log_handle,
+                    rank=rank,
+                )
 
             if should_stop:
                 if rank == 0:
@@ -2434,9 +2610,23 @@ def main() -> None:
             print(f"History JSON         : {args.output / 'history.json'}")
             print(f"History CSV          : {args.output / 'history.csv'}")
             print(f"Loss curve           : {args.output / 'loss_curve.png'}")
+
+            if kaggle_upload_process is not None:
+                print("Kaggle upload         : en cours en arrière-plan")
+                print(
+                    "Kaggle upload log     : "
+                    f"{args.output / f'kaggle_upload_epoch_{epoch + 1:03d}.log'}"
+                )
+
             print("=" * 88)
 
     finally:
+        if rank == 0:
+            if kaggle_upload_log_handle is not None:
+                try:
+                    kaggle_upload_log_handle.flush()
+                except Exception:
+                    pass
         cleanup_distributed()
 
 
