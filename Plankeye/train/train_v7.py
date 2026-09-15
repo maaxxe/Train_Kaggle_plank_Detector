@@ -74,7 +74,8 @@ from model_v7 import (
     model_metadata,
 )
 
-print("====================Train_V7=====================")
+print("====================Model_V7_0=====================")
+
 # =============================================================================
 # GLOBAL SETTINGS
 # =============================================================================
@@ -138,8 +139,17 @@ def setup_distributed() -> Tuple[bool, int, int, int, torch.device]:
         rank = int(os.environ["RANK"])
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://")
         device = torch.device("cuda", local_rank)
+        try:
+            # Explicit device mapping avoids NCCL guessing the rank -> GPU map.
+            dist.init_process_group(
+                backend="nccl",
+                init_method="env://",
+                device_id=device,
+            )
+        except TypeError:
+            # Compatibility with older PyTorch versions.
+            dist.init_process_group(backend="nccl", init_method="env://")
     else:
         rank = 0
         local_rank = 0
@@ -158,7 +168,10 @@ def cleanup_distributed() -> None:
 
 def barrier() -> None:
     if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        if torch.cuda.is_available():
+            dist.barrier(device_ids=[torch.cuda.current_device()])
+        else:
+            dist.barrier()
 
 
 def is_main_process(rank: int) -> bool:
@@ -1025,10 +1038,37 @@ def optimizer_to_device(optimizer: torch.optim.Optimizer, device: torch.device) 
 
 
 def create_grad_scaler(enabled: bool):
+    # The default PyTorch initial scale (65536) is aggressive for the V7
+    # multi-head geometry loss on T4 FP16. Start lower and let GradScaler grow.
+    kwargs = {
+        "enabled": enabled,
+        "init_scale": 4096.0,
+        "growth_factor": 2.0,
+        "backoff_factor": 0.5,
+        "growth_interval": 2000,
+    }
     try:
-        return torch.amp.GradScaler("cuda", enabled=enabled)
+        return torch.amp.GradScaler("cuda", **kwargs)
     except TypeError:
-        return torch.cuda.amp.GradScaler(enabled=enabled)
+        return torch.cuda.amp.GradScaler(**kwargs)
+
+
+def predictions_to_float32(preds):
+    """Keep the CNN forward in FP16 but compute all V7 losses in FP32.
+
+    The geometry loss contains vector normalization, small edge lengths and
+    consistency terms. Computing these directly in FP16 can create Inf/NaN
+    gradients even when the scalar forward loss is finite. Casting only the
+    six output maps is cheap compared with running the full network in FP32.
+    """
+    return preds.__class__(
+        heatmap_logits=preds.heatmap_logits.float(),
+        corner_delta_logits=preds.corner_delta_logits.float(),
+        corner_abs_logits=preds.corner_abs_logits.float(),
+        center_offsets=preds.center_offsets.float(),
+        size_logits=preds.size_logits.float(),
+        quality_logits=preds.quality_logits.float(),
+    )
 
 
 # =============================================================================
@@ -1313,13 +1353,26 @@ def train_one_epoch(
         )
 
         with sync_context:
+            # CNN forward stays in FP16 for speed and VRAM savings.
             with torch.autocast(
                 device_type=device.type,
                 dtype=torch.float16,
                 enabled=amp_enabled,
             ):
                 preds = model(images)
-                loss, logs = combined_loss_v7(preds, batch_objects, device)
+
+            # Losses are deliberately evaluated in FP32. This is important for
+            # the geometry terms (normalize / tiny edge lengths / consistency).
+            with torch.autocast(
+                device_type=device.type,
+                enabled=False,
+            ):
+                preds_for_loss = predictions_to_float32(preds)
+                loss, logs = combined_loss_v7(
+                    preds_for_loss,
+                    batch_objects,
+                    device,
+                )
 
             finite_everywhere = all_ranks_finite(loss, device, distributed)
             if not finite_everywhere:
@@ -1368,10 +1421,19 @@ def train_one_epoch(
                     ema.update(model)
             else:
                 skipped_nonfinite += 1
-                scaler.update()
+
+                # Force the same scale reduction on every DDP rank. A plain
+                # scaler.update() can diverge between ranks if only one rank
+                # observed the overflow.
+                old_scale = float(scaler.get_scale())
+                new_scale = max(1.0, old_scale * 0.5)
+                scaler.update(new_scale=new_scale)
+
                 if rank == 0:
                     progress.write(
-                        f"WARNING: non-finite gradient norm at epoch {epoch + 1}, batch {batch_index + 1}; step skipped."
+                        f"WARNING: non-finite gradient norm at epoch {epoch + 1}, "
+                        f"batch {batch_index + 1}; step skipped; "
+                        f"AMP scale {old_scale:.0f} -> {new_scale:.0f}."
                     )
 
             optimizer.zero_grad(set_to_none=True)
@@ -1426,7 +1488,17 @@ def validate_one_epoch(
             enabled=amp_enabled,
         ):
             preds = model(images)
-            _loss, logs = combined_loss_v7(preds, batch_objects, device)
+
+        with torch.autocast(
+            device_type=device.type,
+            enabled=False,
+        ):
+            preds_for_loss = predictions_to_float32(preds)
+            _loss, logs = combined_loss_v7(
+                preds_for_loss,
+                batch_objects,
+                device,
+            )
 
         accumulator.update(logs, batch_size=batch_size)
 
@@ -1968,7 +2040,7 @@ def main() -> None:
                 # Unused-parameter detection keeps reduction correct while some
                 # backbone stages are frozen.
                 find_unused_parameters=progressive_unfreeze,
-                gradient_as_bucket_view=True,
+                gradient_as_bucket_view=False,
             )
 
         ema = None
