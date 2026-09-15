@@ -15,16 +15,23 @@ Designed for:
 
 Expected project layout:
     project/
-      model.py
-      train.py
+      model_v7.py
+      train_v7.py
       data_kaggle_2_propre/
         images/
         labels/
 
 Recommended 2-GPU launch:
-    torchrun --standalone --nproc_per_node=2 train.py \
+    torchrun --standalone --nproc_per_node=2 train_v7.py \
         --data data_kaggle_2_propre \
         --output runs/plankeye_v7
+
+Progressive backbone unfreezing (default, 1-based epochs):
+- epochs 1-3  : heads/neck only, ResNet50 backbone frozen;
+- epochs 4-8  : ResNet50 layer4 trainable;
+- epochs 9-15 : ResNet50 layer3 + layer4 trainable;
+- epoch 16+   : complete ResNet50 trainable.
+Backbone BatchNorm layers stay frozen by default.
 """
 
 import argparse
@@ -58,7 +65,7 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
-from model import (
+from model_v7 import (
     IMG_SIZE,
     MODEL_VERSION,
     NUM_CLASSES,
@@ -67,7 +74,7 @@ from model import (
     model_metadata,
 )
 
-
+print("====================Train_V7====================")
 # =============================================================================
 # GLOBAL SETTINGS
 # =============================================================================
@@ -82,7 +89,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
     ".webp",
 }
 
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 3
 DEFAULT_SEED = 1337
 
 # OpenCV uses its own thread pool. DataLoader already parallelizes loading.
@@ -1025,6 +1032,165 @@ def create_grad_scaler(enabled: bool):
 
 
 # =============================================================================
+# PROGRESSIVE BACKBONE UNFREEZING
+# =============================================================================
+
+
+BACKBONE_STAGE_FROZEN = "heads_only"
+BACKBONE_STAGE_LAYER4 = "layer4"
+BACKBONE_STAGE_LAYER34 = "layer3_layer4"
+BACKBONE_STAGE_FULL = "full_backbone"
+
+
+def progressive_unfreeze_enabled(
+    args: argparse.Namespace,
+    pretrained_backbone: bool,
+) -> bool:
+    """Enable gradual unfreezing only for a pretrained backbone by default."""
+    return bool(pretrained_backbone and not args.no_progressive_unfreeze)
+
+
+def backbone_stage_for_epoch(
+    epoch: int,
+    args: argparse.Namespace,
+    enabled: bool,
+) -> str:
+    """Return the desired backbone trainability stage for a zero-based epoch."""
+    if not enabled:
+        return BACKBONE_STAGE_FULL
+
+    epoch_human = int(epoch) + 1
+
+    if epoch_human < args.unfreeze_layer4_epoch:
+        return BACKBONE_STAGE_FROZEN
+
+    if epoch_human < args.unfreeze_layer3_epoch:
+        return BACKBONE_STAGE_LAYER4
+
+    if epoch_human < args.unfreeze_all_epoch:
+        return BACKBONE_STAGE_LAYER34
+
+    return BACKBONE_STAGE_FULL
+
+
+def _set_module_requires_grad(module: nn.Module, value: bool) -> None:
+    for parameter in module.parameters():
+        parameter.requires_grad_(value)
+
+
+def apply_backbone_stage(
+    model: nn.Module,
+    stage: str,
+    *,
+    freeze_backbone_bn: bool,
+) -> Dict[str, int | str]:
+    """Apply one progressive unfreezing stage to the ResNet50 backbone.
+
+    The optimizer must be built BEFORE the first call to this function so all
+    backbone parameters are already present in its parameter groups. Frozen
+    parameters then simply have no gradient/update until they are unfrozen.
+    """
+    base_model = unwrap_model(model)
+
+    if not hasattr(base_model, "backbone"):
+        raise AttributeError("PlankEyeV7 model has no 'backbone' attribute.")
+
+    backbone = base_model.backbone
+
+    # Start from a fully frozen backbone, then selectively enable stages.
+    _set_module_requires_grad(backbone, False)
+
+    if stage == BACKBONE_STAGE_FROZEN:
+        pass
+
+    elif stage == BACKBONE_STAGE_LAYER4:
+        _set_module_requires_grad(backbone.layer4, True)
+
+    elif stage == BACKBONE_STAGE_LAYER34:
+        _set_module_requires_grad(backbone.layer3, True)
+        _set_module_requires_grad(backbone.layer4, True)
+
+    elif stage == BACKBONE_STAGE_FULL:
+        _set_module_requires_grad(backbone, True)
+
+    else:
+        raise ValueError(f"Unknown backbone stage: {stage!r}")
+
+    # With the small per-GPU batches used on the T4s, keeping pretrained
+    # BatchNorm statistics/affine parameters frozen is substantially safer.
+    if freeze_backbone_bn:
+        for module in backbone.modules():
+            if isinstance(module, nn.BatchNorm2d):
+                module.eval()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(False)
+
+    backbone_total = sum(parameter.numel() for parameter in backbone.parameters())
+    backbone_trainable = sum(
+        parameter.numel()
+        for parameter in backbone.parameters()
+        if parameter.requires_grad
+    )
+    model_total = sum(parameter.numel() for parameter in base_model.parameters())
+    model_trainable = sum(
+        parameter.numel()
+        for parameter in base_model.parameters()
+        if parameter.requires_grad
+    )
+
+    return {
+        "stage": stage,
+        "backbone_total": int(backbone_total),
+        "backbone_trainable": int(backbone_trainable),
+        "model_total": int(model_total),
+        "model_trainable": int(model_trainable),
+    }
+
+
+def format_trainable_count(value: int) -> str:
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.2f}M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}K"
+    return str(value)
+
+
+def print_backbone_stage(
+    info: Mapping[str, Any],
+    *,
+    epoch: int,
+    rank: int,
+) -> None:
+    if rank != 0:
+        return
+
+    backbone_trainable = int(info["backbone_trainable"])
+    backbone_total = max(1, int(info["backbone_total"]))
+    model_trainable = int(info["model_trainable"])
+    model_total = max(1, int(info["model_total"]))
+
+    print()
+    print("=" * 88)
+    print(f"BACKBONE UNFREEZE STAGE - EPOCH {epoch + 1}")
+    print("=" * 88)
+    print(f"Stage                  : {info['stage']}")
+    print(
+        "Backbone trainable     : "
+        f"{format_trainable_count(backbone_trainable)} / "
+        f"{format_trainable_count(backbone_total)} "
+        f"({100.0 * backbone_trainable / backbone_total:.1f}%)"
+    )
+    print(
+        "Whole model trainable  : "
+        f"{format_trainable_count(model_trainable)} / "
+        f"{format_trainable_count(model_total)} "
+        f"({100.0 * model_trainable / model_total:.1f}%)"
+    )
+    print("=" * 88)
+    print()
+
+
+# =============================================================================
 # METRIC ACCUMULATION
 # =============================================================================
 
@@ -1349,6 +1515,8 @@ def save_checkpoint(
     history: Sequence[dict],
     best_val_loss: float,
     global_optimizer_step: int,
+    backbone_stage: str,
+    backbone_trainability: Mapping[str, Any],
     split_payload: Mapping[str, Any],
     runtime: Mapping[str, Any],
     git: Mapping[str, Any],
@@ -1363,6 +1531,18 @@ def save_checkpoint(
         "epoch_human": int(epoch + 1),
         "epochs_requested": int(args.epochs),
         "global_optimizer_step": int(global_optimizer_step),
+        "backbone_stage": str(backbone_stage),
+        "backbone_trainability": dict(backbone_trainability),
+        "progressive_unfreeze": {
+            "enabled": bool(
+                not args.no_progressive_unfreeze
+                and not args.no_pretrained
+            ),
+            "unfreeze_layer4_epoch": int(args.unfreeze_layer4_epoch),
+            "unfreeze_layer3_epoch": int(args.unfreeze_layer3_epoch),
+            "unfreeze_all_epoch": int(args.unfreeze_all_epoch),
+            "backbone_bn_frozen": bool(not args.unfreeze_backbone_bn),
+        },
         "best_val_loss": float(best_val_loss),
         "train_loss": float(train_metrics.get("total", math.nan)),
         "val_loss": float(val_metrics.get("total", math.nan)),
@@ -1466,6 +1646,8 @@ def save_history_files(output_dir: Path, history: Sequence[dict]) -> None:
             "epoch": item["epoch"],
             "epoch_human": item["epoch_human"],
             "duration_seconds": item.get("duration_seconds"),
+            "backbone_stage": item.get("backbone_stage"),
+            "backbone_trainable": item.get("backbone_trainable"),
         }
         for prefix in ("train", "val"):
             for key, value in item.get(prefix, {}).items():
@@ -1475,7 +1657,7 @@ def save_history_files(output_dir: Path, history: Sequence[dict]) -> None:
         flat_rows.append(row)
 
     all_fields = sorted({key for row in flat_rows for key in row.keys()})
-    preferred = ["epoch", "epoch_human", "duration_seconds"]
+    preferred = ["epoch", "epoch_human", "duration_seconds", "backbone_stage", "backbone_trainable"]
     fields = preferred + [f for f in all_fields if f not in preferred]
 
     with (output_dir / "history.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -1571,6 +1753,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--backbone-lr-mult", type=float, default=0.25)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+
+    # Progressive ResNet50 unfreezing. Epoch numbers are 1-based.
+    parser.add_argument(
+        "--unfreeze-layer4-epoch",
+        type=int,
+        default=4,
+        help="First epoch where ResNet50 layer4 becomes trainable (1-based).",
+    )
+    parser.add_argument(
+        "--unfreeze-layer3-epoch",
+        type=int,
+        default=9,
+        help="First epoch where ResNet50 layer3 + layer4 become trainable (1-based).",
+    )
+    parser.add_argument(
+        "--unfreeze-all-epoch",
+        type=int,
+        default=16,
+        help="First epoch where the complete ResNet50 backbone becomes trainable (1-based).",
+    )
+    parser.add_argument(
+        "--no-progressive-unfreeze",
+        action="store_true",
+        help="Train the complete backbone from epoch 1 (disables progressive unfreezing).",
+    )
     parser.add_argument("--warmup-epochs", type=float, default=3.0)
     parser.add_argument("--min-lr-ratio", type=float, default=0.03)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
@@ -1612,6 +1819,22 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.save_every < 0:
         raise ValueError("--save-every must be >= 0")
 
+    if args.unfreeze_layer4_epoch < 1:
+        raise ValueError("--unfreeze-layer4-epoch must be >= 1")
+    if args.unfreeze_layer3_epoch < 1:
+        raise ValueError("--unfreeze-layer3-epoch must be >= 1")
+    if args.unfreeze_all_epoch < 1:
+        raise ValueError("--unfreeze-all-epoch must be >= 1")
+    if not (
+        args.unfreeze_layer4_epoch
+        <= args.unfreeze_layer3_epoch
+        <= args.unfreeze_all_epoch
+    ):
+        raise ValueError(
+            "Progressive unfreeze epochs must satisfy: "
+            "layer4 <= layer3 <= all."
+        )
+
 
 # =============================================================================
 # MAIN
@@ -1645,6 +1868,10 @@ def main() -> None:
         channels_last = bool(device.type == "cuda" and not args.no_channels_last)
         pretrained_backbone = not args.no_pretrained
         freeze_backbone_bn = not args.unfreeze_backbone_bn
+        progressive_unfreeze = progressive_unfreeze_enabled(
+            args,
+            pretrained_backbone,
+        )
 
         train_records, val_records, split_payload = create_or_load_split(
             data_dir=args.data,
@@ -1736,7 +1963,11 @@ def main() -> None:
                 device_ids=[local_rank],
                 output_device=local_rank,
                 broadcast_buffers=False,
-                find_unused_parameters=False,
+                # Progressive freezing toggles requires_grad after DDP has
+                # registered hooks for all initially trainable backbone params.
+                # Unused-parameter detection keeps reduction correct while some
+                # backbone stages are frozen.
+                find_unused_parameters=progressive_unfreeze,
                 gradient_as_bucket_view=True,
             )
 
@@ -1789,6 +2020,21 @@ def main() -> None:
                 device=device,
             )
 
+        # IMPORTANT: the optimizer was intentionally created before freezing.
+        # Therefore every backbone parameter already belongs to an optimizer
+        # group and can be safely unfrozen later without rebuilding optimizer,
+        # scheduler, or checkpoint state.
+        current_backbone_stage = backbone_stage_for_epoch(
+            start_epoch,
+            args,
+            progressive_unfreeze,
+        )
+        backbone_trainability = apply_backbone_stage(
+            model,
+            current_backbone_stage,
+            freeze_backbone_bn=freeze_backbone_bn,
+        )
+
         runtime = runtime_info(device, world_size)
         git = git_info(Path(__file__).resolve().parent)
 
@@ -1817,6 +2063,20 @@ def main() -> None:
             print(f"EMA                    : {ema is not None}")
             print(f"Pretrained backbone    : {pretrained_backbone}")
             print(f"Frozen backbone BN     : {freeze_backbone_bn}")
+            print(f"Progressive unfreeze   : {progressive_unfreeze}")
+            if progressive_unfreeze:
+                print(
+                    "Unfreeze schedule      : "
+                    f"L4@{args.unfreeze_layer4_epoch}, "
+                    f"L3+L4@{args.unfreeze_layer3_epoch}, "
+                    f"ALL@{args.unfreeze_all_epoch}"
+                )
+            print(f"Initial backbone stage : {current_backbone_stage}")
+            print(
+                "Backbone trainable     : "
+                f"{format_trainable_count(int(backbone_trainability['backbone_trainable']))} / "
+                f"{format_trainable_count(int(backbone_trainability['backbone_total']))}"
+            )
             print(f"Base LR                : {args.lr:.3e}")
             print(f"Backbone LR            : {args.lr * args.backbone_lr_mult:.3e}")
             print(f"Warmup steps           : {effective_warmup_steps}")
@@ -1845,7 +2105,7 @@ def main() -> None:
 
             # Keep exact source code beside every training run.
             project_dir = Path(__file__).resolve().parent
-            for filename in ("model.py", "train.py"):
+            for filename in ("model_v7.py", "train_v7.py"):
                 source = project_dir / filename
                 if source.exists():
                     shutil.copy2(source, args.output / filename)
@@ -1878,6 +2138,35 @@ def main() -> None:
 
         for epoch in range(start_epoch, args.epochs):
             epoch_start = time.time()
+
+            desired_backbone_stage = backbone_stage_for_epoch(
+                epoch,
+                args,
+                progressive_unfreeze,
+            )
+
+            if desired_backbone_stage != current_backbone_stage:
+                # All ranks execute the exact same transition at the epoch
+                # boundary. No optimizer rebuild is needed because all backbone
+                # parameters were registered before the first freeze.
+                if distributed:
+                    barrier()
+
+                current_backbone_stage = desired_backbone_stage
+                backbone_trainability = apply_backbone_stage(
+                    model,
+                    current_backbone_stage,
+                    freeze_backbone_bn=freeze_backbone_bn,
+                )
+
+                if distributed:
+                    barrier()
+
+                print_backbone_stage(
+                    backbone_trainability,
+                    epoch=epoch,
+                    rank=rank,
+                )
 
             train_metrics, optimizer_steps = train_one_epoch(
                 model=model,
@@ -1932,6 +2221,10 @@ def main() -> None:
                 "learning_rates": learning_rates,
                 "best_val_loss": best_val_loss,
                 "global_optimizer_step": global_optimizer_step,
+                "backbone_stage": current_backbone_stage,
+                "backbone_trainable": int(
+                    backbone_trainability["backbone_trainable"]
+                ),
             }
             history.append(history_item)
 
@@ -1960,6 +2253,12 @@ def main() -> None:
                     "LR: "
                     + ", ".join(f"{name}={value:.3e}" for name, value in learning_rates.items())
                 )
+                print(
+                    "Backbone stage: "
+                    f"{current_backbone_stage} | trainable "
+                    f"{format_trainable_count(int(backbone_trainability['backbone_trainable']))} / "
+                    f"{format_trainable_count(int(backbone_trainability['backbone_total']))}"
+                )
                 print("-" * 88)
 
                 save_checkpoint(
@@ -1977,6 +2276,8 @@ def main() -> None:
                     history=history,
                     best_val_loss=best_val_loss,
                     global_optimizer_step=global_optimizer_step,
+                    backbone_stage=current_backbone_stage,
+                    backbone_trainability=backbone_trainability,
                     split_payload=split_payload,
                     runtime=runtime,
                     git=git,
@@ -1998,6 +2299,8 @@ def main() -> None:
                         history=history,
                         best_val_loss=best_val_loss,
                         global_optimizer_step=global_optimizer_step,
+                        backbone_stage=current_backbone_stage,
+                        backbone_trainability=backbone_trainability,
                         split_payload=split_payload,
                         runtime=runtime,
                         git=git,
@@ -2020,6 +2323,8 @@ def main() -> None:
                         history=history,
                         best_val_loss=best_val_loss,
                         global_optimizer_step=global_optimizer_step,
+                        backbone_stage=current_backbone_stage,
+                        backbone_trainability=backbone_trainability,
                         split_payload=split_payload,
                         runtime=runtime,
                         git=git,

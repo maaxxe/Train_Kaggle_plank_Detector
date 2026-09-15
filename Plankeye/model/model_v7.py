@@ -38,6 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import ResNet50_Weights, resnet50
 
+print("====================Model_V7====================")
 
 # =============================================================================
 # MODEL / TRAINING CONSTANTS
