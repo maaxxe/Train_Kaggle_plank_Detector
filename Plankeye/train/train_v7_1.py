@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Training script for PlankEye V7.
+"""Training script for PlankEye V7.1 (corner-focused).
 
 Designed for:
 - one or several GPUs through torchrun / DistributedDataParallel (DDP);
@@ -15,14 +15,14 @@ Designed for:
 
 Expected project layout:
     project/
-      model_v7.py
-      train_v7.py
+      model_v7_1.py
+      train_v7_1.py
       data_kaggle_2_propre/
         images/
         labels/
 
 Recommended 2-GPU launch:
-    torchrun --standalone --nproc_per_node=2 train_v7.py \
+    torchrun --standalone --nproc_per_node=2 train_v7_1.py \
         --data data_kaggle_2_propre \
         --output runs/plankeye_v7
 
@@ -65,19 +65,16 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 
-from model_v7 import (
+from model_v7_1 import (
     IMG_SIZE,
     MODEL_VERSION,
     NUM_CLASSES,
-    LOSS_W_CORNER_DELTA,
-    LOSS_W_CORNER_ABS,
-    LOSS_W_RECONSTRUCTION,
     PlankEyeV7,
-    combined_loss_v7,
+    combined_loss_v7_1,
     model_metadata,
 )
 
-print("====================Train_V7_4=====================")
+print("====================Train_V7_1_CORNER_FOCUS=====================")
 
 # =============================================================================
 # GLOBAL SETTINGS
@@ -1136,7 +1133,7 @@ def apply_backbone_stage(
     base_model = unwrap_model(model)
 
     if not hasattr(base_model, "backbone"):
-        raise AttributeError("PlankEyeV7 model has no 'backbone' attribute.")
+        raise AttributeError("PlankEye V7.1 model has no 'backbone' attribute.")
 
     backbone = base_model.backbone
 
@@ -1371,7 +1368,7 @@ def train_one_epoch(
                 enabled=False,
             ):
                 preds_for_loss = predictions_to_float32(preds)
-                loss, logs = combined_loss_v7(
+                loss, logs = combined_loss_v7_1(
                     preds_for_loss,
                     batch_objects,
                     device,
@@ -1497,7 +1494,7 @@ def validate_one_epoch(
             enabled=False,
         ):
             preds_for_loss = predictions_to_float32(preds)
-            _loss, logs = combined_loss_v7(
+            _loss, logs = combined_loss_v7_1(
                 preds_for_loss,
                 batch_objects,
                 device,
@@ -1574,63 +1571,6 @@ def runtime_info(device: torch.device, world_size: int) -> dict:
     }
 
 
-
-def corner_checkpoint_score(metrics: Mapping[str, float]) -> float:
-    """Weighted corner-regression score used only for checkpoint selection.
-
-    Lower is better. This deliberately excludes heatmap/quality/size losses so
-    a geometrically better model is not rejected just because detection losses
-    fluctuate on the small validation set.
-    """
-    corner_delta = float(metrics.get("corner_delta", math.inf))
-    corner_abs = float(metrics.get("corner_abs", math.inf))
-    reconstruction = float(metrics.get("reconstruction", math.inf))
-
-    values = (corner_delta, corner_abs, reconstruction)
-    if not all(math.isfinite(v) for v in values):
-        return math.inf
-
-    weight_sum = (
-        float(LOSS_W_CORNER_DELTA)
-        + float(LOSS_W_CORNER_ABS)
-        + float(LOSS_W_RECONSTRUCTION)
-    )
-    if weight_sum <= 0:
-        return math.inf
-
-    return (
-        float(LOSS_W_CORNER_DELTA) * corner_delta
-        + float(LOSS_W_CORNER_ABS) * corner_abs
-        + float(LOSS_W_RECONSTRUCTION) * reconstruction
-    ) / weight_sum
-
-
-def recover_best_geometry_scores(history: Sequence[dict]) -> Tuple[float, float]:
-    """Recover best angle/corner selection scores from existing history.
-
-    This keeps resume backward-compatible with old V7 checkpoints: no new
-    checkpoint field is required. If the historical metrics are present, the
-    new selectors continue from the true historical minimum.
-    """
-    best_angle = math.inf
-    best_corners = math.inf
-
-    for item in history:
-        val = item.get("val", {})
-        if not isinstance(val, Mapping):
-            continue
-
-        angle = float(val.get("geom_angle", math.inf))
-        corners = corner_checkpoint_score(val)
-
-        if math.isfinite(angle):
-            best_angle = min(best_angle, angle)
-        if math.isfinite(corners):
-            best_corners = min(best_corners, corners)
-
-    return best_angle, best_corners
-
-
 def save_checkpoint(
     path: Path,
     *,
@@ -1646,6 +1586,7 @@ def save_checkpoint(
     val_metrics: Mapping[str, float],
     history: Sequence[dict],
     best_val_loss: float,
+    best_corner_loss: float,
     global_optimizer_step: int,
     backbone_stage: str,
     backbone_trainability: Mapping[str, Any],
@@ -1668,7 +1609,7 @@ def save_checkpoint(
         "progressive_unfreeze": {
             "enabled": bool(
                 not args.no_progressive_unfreeze
-                and not args.no_pretrained
+                and (not args.no_pretrained or bool(args.init_from.strip()))
             ),
             "unfreeze_layer4_epoch": int(args.unfreeze_layer4_epoch),
             "unfreeze_layer3_epoch": int(args.unfreeze_layer3_epoch),
@@ -1676,6 +1617,7 @@ def save_checkpoint(
             "backbone_bn_frozen": bool(not args.unfreeze_backbone_bn),
         },
         "best_val_loss": float(best_val_loss),
+        "best_corner_loss": float(best_corner_loss),
         "train_loss": float(train_metrics.get("total", math.nan)),
         "val_loss": float(val_metrics.get("total", math.nan)),
         "train_metrics": dict(train_metrics),
@@ -1731,7 +1673,7 @@ def load_checkpoint(
     scheduler: LambdaLR,
     scaler,
     device: torch.device,
-) -> Tuple[int, float, List[dict], int]:
+) -> Tuple[int, float, float, List[dict], int]:
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
 
     ckpt_model_version = checkpoint.get("model_version")
@@ -1756,10 +1698,52 @@ def load_checkpoint(
 
     start_epoch = int(checkpoint["epoch"]) + 1
     best_val_loss = float(checkpoint.get("best_val_loss", math.inf))
+    best_corner_loss = float(checkpoint.get("best_corner_loss", math.inf))
     history = list(checkpoint.get("history", []))
     global_step = int(checkpoint.get("global_optimizer_step", 0))
 
-    return start_epoch, best_val_loss, history, global_step
+    return start_epoch, best_val_loss, best_corner_loss, history, global_step
+
+
+def load_initial_model_weights(
+    path: Path,
+    *,
+    model: nn.Module,
+    prefer_ema: bool = True,
+) -> str:
+    """Load model weights only, resetting optimizer/scheduler/history.
+
+    This is intentionally version-tolerant so a V7 checkpoint can initialize
+    V7.1. The V7.1 architecture is state-dict compatible with V7; only the loss
+    objective and checkpoint selection are changed.
+    """
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+
+    source = "model_state_dict"
+    state = checkpoint.get("model_state_dict")
+
+    ema_state = checkpoint.get("ema_state_dict")
+    if prefer_ema and ema_state is not None:
+        if isinstance(ema_state, Mapping):
+            state = ema_state.get("model", ema_state)
+        else:
+            state = ema_state
+        source = "ema_state_dict.model"
+
+    if state is None:
+        # Allow a raw state_dict as a convenience.
+        if isinstance(checkpoint, Mapping) and checkpoint and all(
+            torch.is_tensor(v) for v in checkpoint.values()
+        ):
+            state = checkpoint
+            source = "raw_state_dict"
+        else:
+            raise RuntimeError(
+                f"No compatible model weights found in initialization checkpoint: {path}"
+            )
+
+    unwrap_model(model).load_state_dict(state, strict=True)
+    return source
 
 
 def save_history_files(output_dir: Path, history: Sequence[dict]) -> None:
@@ -1810,7 +1794,7 @@ def save_history_files(output_dir: Path, history: Sequence[dict]) -> None:
         plt.plot(epochs, val_loss, label="validation total")
         plt.xlabel("Epoch")
         plt.ylabel("Loss")
-        plt.title("PlankEye V7 training")
+        plt.title("PlankEye V7.1 corner-focused training")
         plt.grid(True, alpha=0.25)
         plt.legend()
         plt.tight_layout()
@@ -1910,7 +1894,7 @@ def start_kaggle_upload(
         "--epoch",
         str(epoch_human),
         "--message",
-        f"PlankEye V7 - checkpoint epoch {epoch_human}",
+        f"PlankEye V7.1 - checkpoint epoch {epoch_human}",
     ]
 
     print()
@@ -1984,11 +1968,11 @@ def build_model_safely(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Train PlankEye V7 on normalized 4-corner plank labels."
+        description="Train PlankEye V7.1 corner-focused model on normalized 4-corner plank labels."
     )
 
     parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument("--output", type=Path, default=Path("runs/plankeye_v7"))
+    parser.add_argument("--output", type=Path, default=Path("runs/plankeye_v7_1"))
 
     parser.add_argument("--epochs", type=int, default=180)
     parser.add_argument("--batch-size", type=int, default=4, help="Batch size per GPU.")
@@ -2032,6 +2016,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--save-every", type=int, default=10)
     parser.add_argument("--resume", type=str, default="", help="Checkpoint path or 'auto'.")
+    parser.add_argument(
+        "--init-from",
+        type=str,
+        default="",
+        help=(
+            "Model-only initialization checkpoint (V7 or V7.1). "
+            "Optimizer/scheduler/history are reset. Do not combine with --resume."
+        ),
+    )
+    parser.add_argument(
+        "--init-from-no-ema",
+        action="store_true",
+        help="With --init-from, use model_state_dict instead of EMA weights.",
+    )
 
     # Optional automatic backup to an existing Kaggle Dataset.
     # Only rank 0 starts the upload, and it runs in a background subprocess so
@@ -2064,6 +2062,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.resume.strip() and args.init_from.strip():
+        raise ValueError("Use either --resume or --init-from, not both.")
     if args.epochs <= 0:
         raise ValueError("--epochs must be > 0")
     if args.batch_size <= 0:
@@ -2141,11 +2141,23 @@ def main() -> None:
         augment_cfg = AugmentConfig()
         amp_enabled = bool(device.type == "cuda" and not args.no_amp)
         channels_last = bool(device.type == "cuda" and not args.no_channels_last)
-        pretrained_backbone = not args.no_pretrained
+
+        init_from_path = None
+        if args.init_from.strip():
+            init_from_path = Path(args.init_from).expanduser()
+            if not init_from_path.is_absolute():
+                init_from_path = (Path.cwd() / init_from_path).resolve()
+            if not init_from_path.exists():
+                raise FileNotFoundError(f"Initialization checkpoint not found: {init_from_path}")
+
+        # If --init-from is provided, loading ImageNet weights first is wasteful:
+        # the checkpoint immediately overwrites the whole model state.
+        imagenet_pretrained = bool(not args.no_pretrained and init_from_path is None)
+        pretrained_source_available = bool(not args.no_pretrained or init_from_path is not None)
         freeze_backbone_bn = not args.unfreeze_backbone_bn
         progressive_unfreeze = progressive_unfreeze_enabled(
             args,
-            pretrained_backbone,
+            pretrained_source_available,
         )
 
         train_records, val_records, split_payload = create_or_load_split(
@@ -2224,13 +2236,26 @@ def main() -> None:
         )
 
         model = build_model_safely(
-            pretrained_backbone=pretrained_backbone,
+            pretrained_backbone=imagenet_pretrained,
             freeze_backbone_bn=freeze_backbone_bn,
             device=device,
             distributed=distributed,
             rank=rank,
             channels_last=channels_last,
         )
+
+        init_weight_source = None
+        if init_from_path is not None:
+            init_weight_source = load_initial_model_weights(
+                init_from_path,
+                model=model,
+                prefer_ema=not args.init_from_no_ema,
+            )
+            if rank == 0:
+                print(
+                    f"Initialized V7.1 weights from {init_from_path} "
+                    f"using {init_weight_source}."
+                )
 
         if distributed:
             model = DDP(
@@ -2272,6 +2297,7 @@ def main() -> None:
 
         start_epoch = 0
         best_val_loss = math.inf
+        best_corner_loss = math.inf
         history: List[dict] = []
         global_optimizer_step = 0
         epochs_without_improvement = 0
@@ -2283,6 +2309,7 @@ def main() -> None:
             (
                 start_epoch,
                 best_val_loss,
+                best_corner_loss,
                 history,
                 global_optimizer_step,
             ) = load_checkpoint(
@@ -2293,38 +2320,6 @@ def main() -> None:
                 scheduler=scheduler,
                 scaler=scaler,
                 device=device,
-            )
-
-        # Geometry-specific selectors. If the corresponding checkpoint file does
-        # not exist yet (e.g. first resume after upgrading an older V7 run), do
-        # NOT reuse a historical numeric minimum that has no matching weights.
-        # Start from +inf so the next completed epoch creates a real checkpoint.
-        historical_best_angle, historical_best_corner = recover_best_geometry_scores(history)
-
-        best_angles_path = args.output / "best_angles.pt"
-        best_corners_path = args.output / "best_corners.pt"
-
-        best_angle_loss = (
-            historical_best_angle if best_angles_path.exists() else math.inf
-        )
-        best_corner_score = (
-            historical_best_corner if best_corners_path.exists() else math.inf
-        )
-
-        if rank == 0:
-            angle_text = (
-                f"{best_angle_loss:.6f}"
-                if math.isfinite(best_angle_loss)
-                else "n/a"
-            )
-            corner_text = (
-                f"{best_corner_score:.6f}"
-                if math.isfinite(best_corner_score)
-                else "n/a"
-            )
-            print(
-                "Checkpoint selectors | "
-                f"best angle={angle_text} | best corners={corner_text}"
             )
 
         # IMPORTANT: the optimizer was intentionally created before freezing.
@@ -2351,7 +2346,7 @@ def main() -> None:
 
             print()
             print("=" * 88)
-            print("PLANKEYE V7 TRAINING")
+            print("PLANKEYE V7.1 CORNER-FOCUSED TRAINING")
             print("=" * 88)
             print(f"Model version          : {MODEL_VERSION}")
             print(f"Data                   : {args.data}")
@@ -2368,7 +2363,8 @@ def main() -> None:
             print(f"AMP FP16               : {amp_enabled}")
             print(f"Channels last          : {channels_last}")
             print(f"EMA                    : {ema is not None}")
-            print(f"Pretrained backbone    : {pretrained_backbone}")
+            print(f"ImageNet preload       : {imagenet_pretrained}")
+            print(f"Init checkpoint        : {init_from_path if init_from_path is not None else 'none'}")
             print(f"Frozen backbone BN     : {freeze_backbone_bn}")
             print(f"Progressive unfreeze   : {progressive_unfreeze}")
             if progressive_unfreeze:
@@ -2405,6 +2401,8 @@ def main() -> None:
                 print("WARNING: multiple GPUs are visible but DDP is not active. Launch with torchrun.")
             if resume_path is not None:
                 print(f"Resume epoch           : {start_epoch + 1}")
+            elif init_from_path is not None:
+                print("Training state         : fresh optimizer/scheduler from initialized weights")
             print("=" * 88)
             print()
 
@@ -2419,7 +2417,7 @@ def main() -> None:
 
             # Keep exact source code beside every training run.
             project_dir = Path(__file__).resolve().parent
-            for filename in ("model_v7.py", "train_v7.py"):
+            for filename in ("model_v7_1.py", "train_v7_1.py"):
                 source = project_dir / filename
                 if source.exists():
                     shutil.copy2(source, args.output / filename)
@@ -2517,18 +2515,9 @@ def main() -> None:
 
             epoch_duration = time.time() - epoch_start
             val_loss = float(val_metrics["total"])
-            val_angle_loss = float(val_metrics.get("geom_angle", math.inf))
-            val_corner_score = corner_checkpoint_score(val_metrics)
-
+            val_corner_focus = float(val_metrics.get("corner_focus", math.inf))
             improved = val_loss < best_val_loss
-            improved_angles = (
-                math.isfinite(val_angle_loss)
-                and val_angle_loss < best_angle_loss
-            )
-            improved_corners = (
-                math.isfinite(val_corner_score)
-                and val_corner_score < best_corner_score
-            )
+            improved_corners = val_corner_focus < best_corner_loss
 
             if improved:
                 best_val_loss = val_loss
@@ -2536,11 +2525,8 @@ def main() -> None:
             else:
                 epochs_without_improvement += 1
 
-            if improved_angles:
-                best_angle_loss = val_angle_loss
-
             if improved_corners:
-                best_corner_score = val_corner_score
+                best_corner_loss = val_corner_focus
 
             learning_rates = current_learning_rates(optimizer)
             history_item = {
@@ -2551,10 +2537,7 @@ def main() -> None:
                 "val": dict(val_metrics),
                 "learning_rates": learning_rates,
                 "best_val_loss": best_val_loss,
-                "val_angle_loss": val_angle_loss,
-                "best_angle_loss": best_angle_loss,
-                "val_corner_score": val_corner_score,
-                "best_corner_score": best_corner_score,
+                "best_corner_loss": best_corner_loss,
                 "global_optimizer_step": global_optimizer_step,
                 "backbone_stage": current_backbone_stage,
                 "backbone_trainable": int(
@@ -2573,6 +2556,11 @@ def main() -> None:
                     f"Best={best_val_loss:.6f}"
                 )
                 print(
+                    f"Corner focus train={train_metrics.get('corner_focus', math.nan):.6f}  "
+                    f"val={val_corner_focus:.6f}  "
+                    f"best={best_corner_loss:.6f}"
+                )
+                print(
                     f"Train corner_delta={train_metrics.get('corner_delta', 0.0):.6f}  "
                     f"abs={train_metrics.get('corner_abs', 0.0):.6f}  "
                     f"recon={train_metrics.get('reconstruction', 0.0):.6f}  "
@@ -2583,12 +2571,6 @@ def main() -> None:
                     f"abs={val_metrics.get('corner_abs', 0.0):.6f}  "
                     f"recon={val_metrics.get('reconstruction', 0.0):.6f}  "
                     f"heatmap={val_metrics.get('heatmap', 0.0):.6f}"
-                )
-                print(
-                    f"Select angle={val_angle_loss:.6f} "
-                    f"(best={best_angle_loss:.6f}) | "
-                    f"corners={val_corner_score:.6f} "
-                    f"(best={best_corner_score:.6f})"
                 )
                 print(
                     "LR: "
@@ -2616,6 +2598,7 @@ def main() -> None:
                     val_metrics=val_metrics,
                     history=history,
                     best_val_loss=best_val_loss,
+                    best_corner_loss=best_corner_loss,
                     global_optimizer_step=global_optimizer_step,
                     backbone_stage=current_backbone_stage,
                     backbone_trainability=backbone_trainability,
@@ -2639,6 +2622,7 @@ def main() -> None:
                         val_metrics=val_metrics,
                         history=history,
                         best_val_loss=best_val_loss,
+                        best_corner_loss=best_corner_loss,
                         global_optimizer_step=global_optimizer_step,
                         backbone_stage=current_backbone_stage,
                         backbone_trainability=backbone_trainability,
@@ -2647,33 +2631,6 @@ def main() -> None:
                         git=git,
                     )
                     print(f"NEW BEST -> {args.output / 'best.pt'}")
-
-                if improved_angles:
-                    save_checkpoint(
-                        args.output / "best_angles.pt",
-                        model=model,
-                        ema=ema,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        scaler=scaler,
-                        epoch=epoch,
-                        args=args,
-                        augment_cfg=augment_cfg,
-                        train_metrics=train_metrics,
-                        val_metrics=val_metrics,
-                        history=history,
-                        best_val_loss=best_val_loss,
-                        global_optimizer_step=global_optimizer_step,
-                        backbone_stage=current_backbone_stage,
-                        backbone_trainability=backbone_trainability,
-                        split_payload=split_payload,
-                        runtime=runtime,
-                        git=git,
-                    )
-                    print(
-                        f"NEW BEST ANGLES -> {args.output / 'best_angles.pt'} "
-                        f"(geom_angle={best_angle_loss:.6f})"
-                    )
 
                 if improved_corners:
                     save_checkpoint(
@@ -2690,6 +2647,7 @@ def main() -> None:
                         val_metrics=val_metrics,
                         history=history,
                         best_val_loss=best_val_loss,
+                        best_corner_loss=best_corner_loss,
                         global_optimizer_step=global_optimizer_step,
                         backbone_stage=current_backbone_stage,
                         backbone_trainability=backbone_trainability,
@@ -2697,10 +2655,7 @@ def main() -> None:
                         runtime=runtime,
                         git=git,
                     )
-                    print(
-                        f"NEW BEST CORNERS -> {args.output / 'best_corners.pt'} "
-                        f"(corner_score={best_corner_score:.6f})"
-                    )
+                    print(f"NEW BEST CORNERS -> {args.output / 'best_corners.pt'}")
 
                 if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
                     save_checkpoint(
@@ -2717,6 +2672,7 @@ def main() -> None:
                         val_metrics=val_metrics,
                         history=history,
                         best_val_loss=best_val_loss,
+                        best_corner_loss=best_corner_loss,
                         global_optimizer_step=global_optimizer_step,
                         backbone_stage=current_backbone_stage,
                         backbone_trainability=backbone_trainability,
@@ -2778,11 +2734,7 @@ def main() -> None:
             print("=" * 88)
             print("TRAINING FINISHED")
             print(f"Best validation loss : {best_val_loss:.6f}")
-            print(f"Best angle loss      : {best_angle_loss:.6f}")
-            print(f"Best corner score    : {best_corner_score:.6f}")
             print(f"Best checkpoint      : {args.output / 'best.pt'}")
-            print(f"Best angles          : {args.output / 'best_angles.pt'}")
-            print(f"Best corners         : {args.output / 'best_corners.pt'}")
             print(f"Last checkpoint      : {args.output / 'last.pt'}")
             print(f"History JSON         : {args.output / 'history.json'}")
             print(f"History CSV          : {args.output / 'history.csv'}")

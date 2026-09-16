@@ -19,7 +19,7 @@ import subprocess
 import time
 from pathlib import Path
 
-print("====================Checkpoint_Sync_v7=====================")
+print("====================Checkpoint_Sync_v7_3=====================")
 
 SMALL_FILES = (
     "dataset_split.json",

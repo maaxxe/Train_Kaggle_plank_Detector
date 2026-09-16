@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "seed": 48,
+  "dataset_dir": "/home/mrobin/MonProjet/augmentation_images_reel/data_kaggle_2",
+  "train": [
+    "image1004.jpg",
+    "image1.jpg",
+    "image1032.jpg",
+    "image1002.jpg",
+    "image1026.jpg",
+    "image1029.jpg",
+    "image1018.jpg",
+    "image1016.jpg",
+    "image1027.jpg",
+    "image1001.jpg",
+    "image1013.jpg",
+    "image103.jpg",
+    "image1006.jpg",
+    "image101.jpg",
+    "image1028.jpg",
+    "image0.jpg",
+    "image1020.jpg",
+    "image1031.jpg",
+    "image1024.jpg",
+    "image1021.jpg",
+    "image1000.jpg",
+    "image1012.jpg",
+    "image10.jpg",
+    "image1009.jpg",
+    "image1010.jpg",
+    "image1008.jpg",
+    "image1019.jpg",
+    "image1025.jpg",
+    "image1005.jpg",
+    "image1023.jpg",
+    "image1022.jpg",
+    "image1017.jpg"
+  ],
+  "val": [
+    "image100.jpg",
+    "image1007.jpg",
+    "image1030.jpg",
+    "image1003.jpg"
+  ],
+  "test": [
+    "image1011.jpg",
+    "image1014.jpg",
+    "image102.jpg",
+    "image1015.jpg"
+  ]
+}
