@@ -69,12 +69,15 @@ from model_v7 import (
     IMG_SIZE,
     MODEL_VERSION,
     NUM_CLASSES,
+    LOSS_W_CORNER_DELTA,
+    LOSS_W_CORNER_ABS,
+    LOSS_W_RECONSTRUCTION,
     PlankEyeV7,
     combined_loss_v7,
     model_metadata,
 )
 
-print("====================Train_V7_1=====================")
+print("====================Train_V7_3=====================")
 
 # =============================================================================
 # GLOBAL SETTINGS
@@ -1571,6 +1574,63 @@ def runtime_info(device: torch.device, world_size: int) -> dict:
     }
 
 
+
+def corner_checkpoint_score(metrics: Mapping[str, float]) -> float:
+    """Weighted corner-regression score used only for checkpoint selection.
+
+    Lower is better. This deliberately excludes heatmap/quality/size losses so
+    a geometrically better model is not rejected just because detection losses
+    fluctuate on the small validation set.
+    """
+    corner_delta = float(metrics.get("corner_delta", math.inf))
+    corner_abs = float(metrics.get("corner_abs", math.inf))
+    reconstruction = float(metrics.get("reconstruction", math.inf))
+
+    values = (corner_delta, corner_abs, reconstruction)
+    if not all(math.isfinite(v) for v in values):
+        return math.inf
+
+    weight_sum = (
+        float(LOSS_W_CORNER_DELTA)
+        + float(LOSS_W_CORNER_ABS)
+        + float(LOSS_W_RECONSTRUCTION)
+    )
+    if weight_sum <= 0:
+        return math.inf
+
+    return (
+        float(LOSS_W_CORNER_DELTA) * corner_delta
+        + float(LOSS_W_CORNER_ABS) * corner_abs
+        + float(LOSS_W_RECONSTRUCTION) * reconstruction
+    ) / weight_sum
+
+
+def recover_best_geometry_scores(history: Sequence[dict]) -> Tuple[float, float]:
+    """Recover best angle/corner selection scores from existing history.
+
+    This keeps resume backward-compatible with old V7 checkpoints: no new
+    checkpoint field is required. If the historical metrics are present, the
+    new selectors continue from the true historical minimum.
+    """
+    best_angle = math.inf
+    best_corners = math.inf
+
+    for item in history:
+        val = item.get("val", {})
+        if not isinstance(val, Mapping):
+            continue
+
+        angle = float(val.get("geom_angle", math.inf))
+        corners = corner_checkpoint_score(val)
+
+        if math.isfinite(angle):
+            best_angle = min(best_angle, angle)
+        if math.isfinite(corners):
+            best_corners = min(best_corners, corners)
+
+    return best_angle, best_corners
+
+
 def save_checkpoint(
     path: Path,
     *,
@@ -2235,6 +2295,26 @@ def main() -> None:
                 device=device,
             )
 
+        # Recover geometry-specific best scores from history. This works with
+        # existing V7 checkpoints created before best_angles/best_corners existed.
+        best_angle_loss, best_corner_score = recover_best_geometry_scores(history)
+
+        if rank == 0:
+            angle_text = (
+                f"{best_angle_loss:.6f}"
+                if math.isfinite(best_angle_loss)
+                else "n/a"
+            )
+            corner_text = (
+                f"{best_corner_score:.6f}"
+                if math.isfinite(best_corner_score)
+                else "n/a"
+            )
+            print(
+                "Checkpoint selectors | "
+                f"best angle={angle_text} | best corners={corner_text}"
+            )
+
         # IMPORTANT: the optimizer was intentionally created before freezing.
         # Therefore every backbone parameter already belongs to an optimizer
         # group and can be safely unfrozen later without rebuilding optimizer,
@@ -2425,13 +2505,30 @@ def main() -> None:
 
             epoch_duration = time.time() - epoch_start
             val_loss = float(val_metrics["total"])
+            val_angle_loss = float(val_metrics.get("geom_angle", math.inf))
+            val_corner_score = corner_checkpoint_score(val_metrics)
+
             improved = val_loss < best_val_loss
+            improved_angles = (
+                math.isfinite(val_angle_loss)
+                and val_angle_loss < best_angle_loss
+            )
+            improved_corners = (
+                math.isfinite(val_corner_score)
+                and val_corner_score < best_corner_score
+            )
 
             if improved:
                 best_val_loss = val_loss
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
+
+            if improved_angles:
+                best_angle_loss = val_angle_loss
+
+            if improved_corners:
+                best_corner_score = val_corner_score
 
             learning_rates = current_learning_rates(optimizer)
             history_item = {
@@ -2442,6 +2539,10 @@ def main() -> None:
                 "val": dict(val_metrics),
                 "learning_rates": learning_rates,
                 "best_val_loss": best_val_loss,
+                "val_angle_loss": val_angle_loss,
+                "best_angle_loss": best_angle_loss,
+                "val_corner_score": val_corner_score,
+                "best_corner_score": best_corner_score,
                 "global_optimizer_step": global_optimizer_step,
                 "backbone_stage": current_backbone_stage,
                 "backbone_trainable": int(
@@ -2470,6 +2571,12 @@ def main() -> None:
                     f"abs={val_metrics.get('corner_abs', 0.0):.6f}  "
                     f"recon={val_metrics.get('reconstruction', 0.0):.6f}  "
                     f"heatmap={val_metrics.get('heatmap', 0.0):.6f}"
+                )
+                print(
+                    f"Select angle={val_angle_loss:.6f} "
+                    f"(best={best_angle_loss:.6f}) | "
+                    f"corners={val_corner_score:.6f} "
+                    f"(best={best_corner_score:.6f})"
                 )
                 print(
                     "LR: "
@@ -2528,6 +2635,60 @@ def main() -> None:
                         git=git,
                     )
                     print(f"NEW BEST -> {args.output / 'best.pt'}")
+
+                if improved_angles:
+                    save_checkpoint(
+                        args.output / "best_angles.pt",
+                        model=model,
+                        ema=ema,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        epoch=epoch,
+                        args=args,
+                        augment_cfg=augment_cfg,
+                        train_metrics=train_metrics,
+                        val_metrics=val_metrics,
+                        history=history,
+                        best_val_loss=best_val_loss,
+                        global_optimizer_step=global_optimizer_step,
+                        backbone_stage=current_backbone_stage,
+                        backbone_trainability=backbone_trainability,
+                        split_payload=split_payload,
+                        runtime=runtime,
+                        git=git,
+                    )
+                    print(
+                        f"NEW BEST ANGLES -> {args.output / 'best_angles.pt'} "
+                        f"(geom_angle={best_angle_loss:.6f})"
+                    )
+
+                if improved_corners:
+                    save_checkpoint(
+                        args.output / "best_corners.pt",
+                        model=model,
+                        ema=ema,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        scaler=scaler,
+                        epoch=epoch,
+                        args=args,
+                        augment_cfg=augment_cfg,
+                        train_metrics=train_metrics,
+                        val_metrics=val_metrics,
+                        history=history,
+                        best_val_loss=best_val_loss,
+                        global_optimizer_step=global_optimizer_step,
+                        backbone_stage=current_backbone_stage,
+                        backbone_trainability=backbone_trainability,
+                        split_payload=split_payload,
+                        runtime=runtime,
+                        git=git,
+                    )
+                    print(
+                        f"NEW BEST CORNERS -> {args.output / 'best_corners.pt'} "
+                        f"(corner_score={best_corner_score:.6f})"
+                    )
 
                 if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
                     save_checkpoint(
@@ -2605,7 +2766,11 @@ def main() -> None:
             print("=" * 88)
             print("TRAINING FINISHED")
             print(f"Best validation loss : {best_val_loss:.6f}")
+            print(f"Best angle loss      : {best_angle_loss:.6f}")
+            print(f"Best corner score    : {best_corner_score:.6f}")
             print(f"Best checkpoint      : {args.output / 'best.pt'}")
+            print(f"Best angles          : {args.output / 'best_angles.pt'}")
+            print(f"Best corners         : {args.output / 'best_corners.pt'}")
             print(f"Last checkpoint      : {args.output / 'last.pt'}")
             print(f"History JSON         : {args.output / 'history.json'}")
             print(f"History CSV          : {args.output / 'history.csv'}")
